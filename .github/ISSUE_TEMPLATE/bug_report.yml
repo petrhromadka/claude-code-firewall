@@ -27,7 +27,7 @@ body:
     id: version
     attributes:
       label: cc-firewall version
-      placeholder: "0.1.0"
+      placeholder: "0.2.0 (cc-firewall --version)"
     validations:
       required: true
   - type: input
