@@ -6,17 +6,30 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
-SHELLS = ("bash", "powershell")
-SELF_TEST_TIMEOUT = 60
+from cc_firewall.policy import PolicyError, load_policy, slow_regex_warnings
 
-_OURS = re.compile(r"\bcc_firewall\b.*\bhook\b", re.DOTALL)
-_PS_TOKEN = re.compile(r"'((?:[^']|'')*)'|([^\s';]+)")
+SHELLS = ("bash", "powershell")
+HOOK_TIMEOUT = 30
+SELF_TEST_TIMEOUT = HOOK_TIMEOUT
+
+_MODULE_ARGS = ["-m", "cc_firewall", "hook"]
+_CONSOLE_SCRIPTS = ("cc-firewall", "cc-firewall.exe")
+# PowerShell ends a single-quoted string at any of these and reads a doubled one as literal.
+_PS_QUOTES = "'\u2018\u2019\u201a\u201b"
+_PS_TOKEN = re.compile(
+    f"[{_PS_QUOTES}]((?:[^{_PS_QUOTES}]|[{_PS_QUOTES}]{{2}})*)[{_PS_QUOTES}]|([^\\s;{_PS_QUOTES}]+)"
+)
+_PS_QUOTE_CHAR = re.compile(f"([{_PS_QUOTES}])")
+_PS_DOUBLED = re.compile(f"[{_PS_QUOTES}]([{_PS_QUOTES}])")
+# A deny for these reasons means the hook cannot use its policy and would deny every call.
+_FAIL_CLOSED = ("unusable policy", "internal error")
 _HINT = (
     "hint: the hook runs Python with -I (isolated), which ignores user site-packages and "
     "PYTHONPATH. Install cc-firewall with `uv tool install` or `pipx`, or into a virtual "
@@ -34,10 +47,7 @@ def default_settings_path() -> Path:
 
 
 def _ps_quote(text: str) -> str:
-    return "'" + text.replace("'", "''") + "'"
-
-
-HOOK_TIMEOUT = 30
+    return "'" + _PS_QUOTE_CHAR.sub(r"\1\1", text) + "'"
 
 
 def hook_entry(policy: Path, shell: str = "bash") -> dict[str, Any]:
@@ -89,7 +99,9 @@ def hook_argv(handler: dict[str, Any]) -> list[str]:
     if isinstance(args, list):
         return [command, *map(str, args)]
     if handler.get("shell") == "powershell":
-        tokens = [bare or quoted.replace("''", "'") for quoted, bare in _PS_TOKEN.findall(command)]
+        tokens = [
+            bare or _PS_DOUBLED.sub(r"\1", quoted) for quoted, bare in _PS_TOKEN.findall(command)
+        ]
         return tokens[1:] if tokens[:1] == ["&"] else tokens
     try:
         return shlex.split(command)
@@ -98,12 +110,18 @@ def hook_argv(handler: dict[str, Any]) -> list[str]:
 
 
 def is_ours(hook: object) -> bool:
-    """Return True if ``hook`` is a handler that runs the firewall."""
+    """Return True if ``hook`` is a handler that runs the firewall.
+
+    That is ``<interpreter> [options] -m cc_firewall hook ...`` or ``cc-firewall hook ...``,
+    matched on argument tokens, so a command that only mentions the name is not ours.
+    """
     if not isinstance(hook, dict):
         return False
-    args = hook.get("args")
-    parts = [hook.get("command", ""), *(args if isinstance(args, list) else [])]
-    return bool(_OURS.search(" ".join(map(str, parts))))
+    argv = hook_argv(hook)
+    if argv[1:2] == ["hook"] and PureWindowsPath(argv[0]).name.lower() in _CONSOLE_SCRIPTS:
+        return True
+    size = len(_MODULE_ARGS)
+    return any(argv[i : i + size] == _MODULE_ARGS for i in range(1, len(argv)))
 
 
 def _pre_tool_use(settings: dict[str, Any]) -> list[Any]:
@@ -131,19 +149,32 @@ def our_handlers(settings: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def add_hook(settings: dict[str, Any], expected: dict[str, Any]) -> bool:
-    """Add the ``expected`` handler or rewrite stale ones in place. Return False if current.
+    """Add the ``expected`` handler or rewrite a stale one in place. Return False if current.
+
+    The first firewall handler is rewritten and any later ones are dropped, together with a
+    matcher group they leave empty.
 
     Raises:
         ValueError: ``hooks`` or ``hooks.PreToolUse`` exists with an unexpected type.
     """
     entries = _pre_tool_use(settings)
     found = changed = False
+    emptied: list[list[Any]] = []
     for handlers in _handler_lists(entries):
-        for i, handler in enumerate(handlers):
-            if is_ours(handler):
-                found = True
-                changed |= handler != expected
-                handlers[i] = expected
+        kept = [h for h in handlers if not is_ours(h)]
+        first = next((i for i, h in enumerate(handlers) if is_ours(h)), None)
+        if first is not None and not found:
+            found = True
+            kept.insert(first, expected)
+        if kept != handlers:
+            changed = True
+            emptied += [handlers] if not kept else []
+            handlers[:] = kept
+    entries[:] = [
+        e
+        for e in entries
+        if not (isinstance(e, dict) and any(e.get("hooks") is h for h in emptied))
+    ]
     if not found:
         entries.append({"matcher": "*", "hooks": [expected]})
     return changed or not found
@@ -210,17 +241,43 @@ def _write_atomic(path: Path, text: str) -> None:
         raise
 
 
+def _backup(path: Path) -> None:
+    """Copy ``path`` to ``<name>.bak`` beside it, replacing a symlink there, never its target.
+
+    Raises:
+        OSError: ``<name>.bak`` exists and is neither a regular file nor a symlink.
+    """
+    bak = path.with_name(path.name + ".bak")
+    with contextlib.suppress(FileNotFoundError):
+        mode = bak.lstat().st_mode
+        if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+            raise OSError(f"{bak} is not a regular file; not overwriting it")
+    fd, tmp = tempfile.mkstemp(dir=bak.parent, prefix=f".{bak.name}.", suffix=".tmp")
+    os.close(fd)
+    try:
+        shutil.copy2(path, tmp)
+        Path(tmp).replace(bak)  # replaces a symlink itself, so its target is never written
+    except BaseException:
+        with contextlib.suppress(OSError):
+            Path(tmp).unlink()
+        raise
+
+
 def _save(path: Path, settings: dict[str, Any]) -> None:
     rendered = json.dumps(settings, indent=2, ensure_ascii=False)
     if path.exists():
-        shutil.copy2(path, path.with_name(path.name + ".bak"))
+        _backup(path)
     _write_atomic(path, rendered + "\n")
 
 
 def _section(settings: dict[str, Any]) -> str:
-    hooks = settings.get("hooks", {})
-    section = {"hooks": {"PreToolUse": hooks.get("PreToolUse", [])}}
-    return json.dumps(section, indent=2, ensure_ascii=False)
+    """Render ``hooks.PreToolUse`` as it will be written, or say which key is removed."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return 'the "hooks" key is removed'
+    if "PreToolUse" not in hooks:
+        return 'the "hooks.PreToolUse" key is removed'
+    return json.dumps({"hooks": {"PreToolUse": hooks["PreToolUse"]}}, indent=2, ensure_ascii=False)
 
 
 def _git_bash() -> str | None:
@@ -264,7 +321,8 @@ def self_test(handler: dict[str, Any]) -> None:
     The audit log goes to a temporary directory, so the real one gets no test record.
 
     Raises:
-        SelfTestError: The command did not exit 0 with empty output or hook JSON.
+        SelfTestError: The command did not exit 0 with empty output or hook JSON, or it denied
+            the probe because it cannot use its policy.
     """
     shell = str(handler.get("shell", "bash"))
     with tempfile.TemporaryDirectory(prefix="cc-firewall-selftest-") as tmp:
@@ -298,12 +356,28 @@ def self_test(handler: dict[str, Any]) -> None:
     if result.returncode != 0:
         raise SelfTestError(f"hook self-test exited {result.returncode}:\n{stderr}\n{_HINT}")
     if stdout:
-        try:
-            output = json.loads(stdout)
-        except ValueError:
-            output = None
-        if not isinstance(output, dict) or "hookSpecificOutput" not in output:
-            raise SelfTestError(f"hook self-test printed something other than hook JSON:\n{stdout}")
+        _check_output(stdout)
+
+
+def _check_output(stdout: str) -> None:
+    try:
+        output = json.loads(stdout)
+    except ValueError:
+        output = None
+    specific = output.get("hookSpecificOutput") if isinstance(output, dict) else None
+    if not isinstance(specific, dict):
+        raise SelfTestError(f"hook self-test printed something other than hook JSON:\n{stdout}")
+    reason = str(specific.get("permissionDecisionReason", ""))
+    if specific.get("permissionDecision") == "deny" and any(r in reason for r in _FAIL_CLOSED):
+        raise SelfTestError(f"hook self-test denied a harmless Read: {reason}")
+
+
+def policy_warnings(policy: Path) -> list[str]:
+    """Return the slow-regex warnings for the policy file, or none if it cannot be loaded."""
+    try:
+        return slow_regex_warnings(load_policy(policy))
+    except PolicyError:
+        return []
 
 
 def install(
@@ -312,13 +386,15 @@ def install(
     """Install the hook into the settings file and return a status message.
 
     With ``dry_run`` the message is the resulting ``hooks.PreToolUse`` section only, so other
-    settings (such as tokens in ``env``) are not printed. Before writing, the hook command is
-    run once through ``shell`` (see :func:`self_test`) unless ``run_self_test`` is False.
+    settings (such as tokens in ``env``) are not printed. Before writing, the policy must load
+    and the hook command is run once through ``shell`` (see :func:`self_test`), unless
+    ``run_self_test`` is False: a hook whose policy is missing or invalid denies every call.
 
     Raises:
         ValueError: The existing settings file is not a JSON object, has odd hook types, or
             holds values (NaN, Infinity) that cannot be written back as JSON.
-        SelfTestError: The hook command failed its self-test; nothing was written.
+        SelfTestError: The policy cannot be loaded or the hook command failed its self-test;
+            nothing was written.
     """
     settings = load_settings(path)
     expected = hook_entry(policy, shell)
@@ -328,6 +404,13 @@ def install(
     if not changed:
         return f"already installed in {path}"
     if run_self_test:
+        try:
+            load_policy(policy, required=True)
+        except PolicyError as exc:
+            raise SelfTestError(
+                f"create the policy first: {exc}\n(the hook denies every tool call without "
+                "a valid policy; --skip-self-test installs it anyway)"
+            ) from exc
         self_test(expected)
     _save(path, settings)
     return f"installed in {path}"
@@ -337,7 +420,8 @@ def uninstall(path: Path, *, dry_run: bool) -> str:
     """Remove the firewall hook from the settings file and return a status message.
 
     Only firewall handlers are removed, plus a matcher group, ``PreToolUse`` or ``hooks``
-    left empty by that. With ``dry_run`` the message is the resulting ``PreToolUse`` section.
+    left empty by that. With ``dry_run`` the message is the ``PreToolUse`` section the real
+    run writes, or which key it removes.
 
     Raises:
         ValueError: The settings file is not valid JSON or not a JSON object.
