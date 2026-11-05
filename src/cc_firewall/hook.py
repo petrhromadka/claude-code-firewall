@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import IO
 
 from cc_firewall.audit import log_decision
 from cc_firewall.engine import evaluate
@@ -47,18 +48,19 @@ def _fail_closed(hook: HookInput | None, reason: str) -> str:
     return format_output("deny", f"cc-firewall: {reason}")
 
 
-def run_hook(raw: str, policy_path: Path | None = None) -> str | None:
-    """Handle one hook invocation and return the stdout text, or None for no decision.
+def run_hook(stdin: IO[bytes], policy_path: Path | None = None) -> str | None:
+    """Read one hook payload from ``stdin`` and return the stdout text, or None for no decision.
 
-    Invalid policy, a malformed payload or any internal error yields a deny (fail closed).
+    An unreadable or malformed payload, a missing explicit ``policy_path``, an invalid policy
+    or any internal error yields a deny (fail closed).
     """
     hook = None
     try:
-        hook = parse_hook_input(raw)
-        policy = load_policy(policy_path)
+        hook = parse_hook_input(stdin.read().decode("utf-8"))
+        policy = load_policy(policy_path, required=policy_path is not None)
         verdict = evaluate(policy, hook.tool, hook.tool_input)
     except PolicyError as exc:
-        return _fail_closed(hook, f"invalid policy, denying all tool calls: {exc}")
+        return _fail_closed(hook, f"unusable policy, denying all tool calls: {exc}")
     except Exception as exc:  # fail closed on anything unexpected
         return _fail_closed(hook, f"internal error, denying tool call: {type(exc).__name__}: {exc}")
     if verdict.decision == "allow":
