@@ -1,5 +1,6 @@
 """Redaction of environment secrets and credential-shaped tokens for the audit log."""
 
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -51,7 +52,8 @@ def redact(value: Any, env: Mapping[str, str]) -> Any:
     """Return ``value`` with sensitive env values and credential-shaped tokens replaced.
 
     Strings are scrubbed directly; dict keys and values and list items are scrubbed
-    recursively, so secrets are removed before any serialization can escape them.
+    recursively, so secrets are removed before any serialization can escape them. A number
+    whose JSON text contains a secret (a numeric PIN or account id) becomes a redacted string.
     """
     return _redact(value, secret_values(env))
 
@@ -63,6 +65,10 @@ def _redact(value: Any, secrets: list[str]) -> Any:
         for pattern in TOKEN_PATTERNS:
             value = pattern.sub("[REDACTED]", value)
         return value
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        text = json.dumps(value)
+        redacted = _redact(text, secrets)
+        return value if redacted == text else redacted
     if isinstance(value, dict):
         return {_redact(k, secrets): _redact(v, secrets) for k, v in value.items()}
     if isinstance(value, list):
