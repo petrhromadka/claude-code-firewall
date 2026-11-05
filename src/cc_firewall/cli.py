@@ -1,13 +1,14 @@
 """Command line interface: hook, check, validate, test, install, uninstall, doctor, log, stats."""
 
 import argparse
+import io
 import json
 import sys
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
-from cc_firewall.audit import read_records
+from cc_firewall.audit import parse_record, read_lines, terminal_safe
 from cc_firewall.doctor import doctor
 from cc_firewall.engine import evaluate
 from cc_firewall.hook import main as hook_main
@@ -19,7 +20,7 @@ from cc_firewall.policy import (
     slow_regex_warnings,
 )
 from cc_firewall.policytest import run_tests
-from cc_firewall.stats import collect, format_stats, has_rule
+from cc_firewall.stats import collect, format_stats
 
 
 def _cmd_hook(args: argparse.Namespace) -> int:
@@ -106,16 +107,33 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return code
 
 
+def _escape_unencodable_output() -> None:
+    """Print characters stdout's encoding lacks (a Windows code page) as escapes, not crash."""
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(errors="backslashreplace")
+
+
+def _selected(line: str, decision: str | None, rule: str | None) -> bool:
+    if decision is None and rule is None:
+        return True
+    record = parse_record(line)
+    return (
+        record is not None
+        and decision in (None, record["decision"])
+        and (rule is None or rule in record["rules"])
+    )
+
+
 def _cmd_log(args: argparse.Namespace) -> int:
-    lines = read_records(sys.maxsize, args.decision)
-    if args.rule is not None:
-        lines = [line for line in lines if has_rule(line, args.rule)]
+    _escape_unencodable_output()
+    lines = [line for line in read_lines() if _selected(line, args.decision, args.rule)]
     for line in lines[-args.tail :] if args.tail > 0 else []:
-        sys.stdout.write(line + "\n")
+        sys.stdout.write(terminal_safe(line) + "\n")
     return 0
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:
+    _escape_unencodable_output()
     sys.stdout.write(format_stats(collect(args.since)) + "\n")
     return 0
 

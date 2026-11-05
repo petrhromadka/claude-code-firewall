@@ -10,6 +10,7 @@ import pytest
 
 from cc_firewall import audit
 from cc_firewall.models import HookInput
+from cc_firewall.sensitive import secret_values
 
 
 @pytest.fixture
@@ -109,3 +110,116 @@ def test_log_file_and_dir_are_private(log: Path, monkeypatch: pytest.MonkeyPatch
     assert stat.S_IMODE(log.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(log.stat().st_mode) == 0o600
     assert stat.S_IMODE((log.parent / "audit.jsonl.1").stat().st_mode) == 0o600
+
+
+def test_control_chars_written_as_ascii_escapes(log: Path) -> None:
+    command = "a\x1b[2Jb\x9bc\u202ed"
+    write({"command": command})
+    assert log.read_bytes().isascii()
+    assert json.loads(last_record(log)["input"]) == {"command": command}
+
+
+def test_dict_keys_tool_and_session_redacted_and_kept_apart(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = "key-" + "value-1a2b3c", "pass-" + "value-4d5e6f"
+    monkeypatch.setenv("OPENAI_KEY", first)
+    monkeypatch.setenv("DB_PASS", second)
+    tool_input = {first: 1, second: 2, "[REDACTED]": 3, "plain": f"x {first} y"}
+    audit.log_decision(HookInput(f"mcp__{first}", tool_input, second, "/w"), "deny", (), "ok")
+    record = last_record(log)
+    assert json.loads(record["input"]) == {
+        "[REDACTED]": 1,
+        "[REDACTED]#2": 2,
+        "[REDACTED]#3": 3,
+        "plain": "x [REDACTED] y",
+    }
+    assert (record["tool"], record["session_id"]) == ("mcp__[REDACTED]", "[REDACTED]")
+
+
+def test_overlapping_secrets_longer_redacted_whole(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    short = "abcd1234" + "efgh"
+    monkeypatch.setenv("SHORT_TOKEN", short)
+    monkeypatch.setenv("LONG_TOKEN", short + "5678ijkl")
+    write({"a": f"x {short}5678ijkl y", "b": f"x {short} y"})
+    assert json.loads(last_record(log)["input"]) == {"a": "x [REDACTED] y", "b": "x [REDACTED] y"}
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "gh" + "o_" + "A1b2" * 9,
+        "gh" + "s_" + "A1b2" * 9,
+        "github" + "_pat_" + "A1b2_" * 13,
+        "sk-" + "ant-" + "api03-" + "A1b2" * 6,
+        "sk-" + "proj-" + "A1b2" * 9,
+        "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+        "xo" + "xb-" + "1234567890-abcdef",
+        "AI" + "za" + "A1b2" * 8 + "xyz",
+        "gl" + "pat-" + "A1b2" * 6,
+        "np" + "m_" + "A1b2" * 9,
+    ],
+)
+def test_known_token_formats_redacted(log: Path, token: str) -> None:
+    write({"command": f"use {token} now"})
+    assert json.loads(last_record(log)["input"]) == {"command": "use [REDACTED] now"}
+
+
+def test_password_style_names_are_secret_but_cwd_vars_are_not() -> None:
+    env = {
+        "DB_PASS": "value-pass-1",
+        "MYSQL_PWD": "value-pwd-22",
+        "SMTP_PW": "value-pw-333",
+        "PWD": "/home/me/project",
+        "OldPwd": "/home/me/other",
+        "PATH": "/usr/bin:/bin",
+    }
+    assert sorted(secret_values(env)) == ["value-pass-1", "value-pw-333", "value-pwd-22"]
+
+
+@pytest.mark.parametrize("kind", ["future", "directory"])
+def test_future_or_directory_lock_is_stale(
+    log: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setattr(audit, "MAX_LOG_BYTES", 10)
+    write({"command": "first"})
+    lock = log.parent / "audit.lock"
+    if kind == "directory":
+        lock.mkdir()
+    else:
+        lock.touch()
+        future = time.time() + 60
+        os.utime(lock, (future, future))
+    write({"command": "second"})
+    assert sorted(p.name for p in log.parent.iterdir()) == ["audit.jsonl", "audit.jsonl.1"]
+
+
+def test_rotate_skipped_when_file_already_small_under_lock(log: Path) -> None:
+    write({"command": "small"})
+    audit._rotate_locked(log)  # the size check outside the lock saw a big file; it shrank
+    assert sorted(p.name for p in log.parent.iterdir()) == ["audit.jsonl"]
+
+
+def test_takeover_puts_back_a_live_lock_it_moved(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log.parent.mkdir()
+    lock = log.parent / "audit.lock"
+    lock.write_text("other-hook", encoding="ascii")
+    verdicts = iter([True, False])  # stale when checked, live once moved: another hook won
+    monkeypatch.setattr(audit, "_is_stale", lambda _: next(verdicts))
+    assert not audit._acquire(lock, "mine")
+    assert sorted(p.name for p in log.parent.iterdir()) == ["audit.lock"]
+    assert lock.read_text(encoding="ascii") == "other-hook"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and O_NOFOLLOW")
+def test_symlinked_log_is_not_followed(log: Path, tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    log.parent.mkdir()
+    log.symlink_to(target)
+    write({"command": "ls"})
+    assert target.read_text(encoding="utf-8") == "keep"

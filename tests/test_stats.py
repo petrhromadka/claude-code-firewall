@@ -49,3 +49,21 @@ def test_log_filters_by_rule(log: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert [json.loads(line)["ts"][:10] for line in lines] == ["2026-11-02"]
     assert main(["log", "--rule", "push", "--tail", "1"]) == 0
     assert len(capsys.readouterr().out.splitlines()) == 1
+
+
+def test_log_and_stats_escape_control_and_bidi_chars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("CC_FIREWALL_HOME", str(tmp_path))
+    nasty = "\x1b]0;x\x07\x9b31m\u202e"
+    legacy = {"ts": "2026-11-01T10:00:00Z", "tool": f"T{nasty}", "decision": "deny", "rules": []}
+    # A record from an older version (raw C1 and bidi characters) and a raw ESC in a bad line.
+    lines = [json.dumps({**legacy, "input": nasty}, ensure_ascii=False), "junk \x1b[2J"]
+    (tmp_path / "audit.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for command in ("log", "stats"):
+        assert main([command]) == 0
+        out = capsys.readouterr().out
+        assert not {"\x1b", "\x07", "\x9b", "\u202e"} & set(out)
+        assert "\\u001b" in out
+        assert "\\u009b" in out
+        assert "\\u202e" in out
