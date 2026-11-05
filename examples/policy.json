@@ -1,0 +1,31 @@
+{
+  "mode": "enforce",
+  "log_allowed": true,
+  "rules": [
+    {
+      "id": "no-env-read",
+      "tools": ["Read", "Edit"],
+      "field": "file_path",
+      "regex": "(^|[\\\\/])\\.env(\\.[^\\\\/]+)?$",
+      "unless_glob": "**/.env.example",
+      "decision": "deny",
+      "reason": "Reading or editing .env files is disabled."
+    },
+    {
+      "id": "confirm-push",
+      "tools": ["Bash"],
+      "field": "command",
+      "regex": "^\\s*git push\\b",
+      "decision": "ask",
+      "reason": "Confirm git push."
+    },
+    {
+      "id": "confirm-rm-rf",
+      "tools": ["Bash"],
+      "field": "command",
+      "regex": "\\brm\\s+-[a-zA-Z]*([rR][a-zA-Z]*f|f[a-zA-Z]*[rR])",
+      "decision": "ask",
+      "reason": "Confirm recursive forced delete."
+    }
+  ]
+}

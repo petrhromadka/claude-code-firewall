@@ -1,7 +1,7 @@
-"""Detection of sensitive environment variables and literal secret tokens."""
+"""Redaction of environment secrets and credential-shaped tokens for the audit log."""
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 
 SENSITIVE_NAME = re.compile(
     r"(TOKEN|SECRET|PASSW|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|SESSION|COOKIE|"
@@ -9,7 +9,7 @@ SENSITIVE_NAME = re.compile(
     re.IGNORECASE,
 )
 
-# Well-known credential formats. Matched against tool input text.
+# Well-known credential formats, used only to scrub text before it is logged.
 TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p)
     for p in (
@@ -29,28 +29,15 @@ TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 MIN_SECRET_LEN = 8
 
 
-def is_sensitive_name(name: str, extra: Iterable[str] = ()) -> bool:
-    """Return True if an env var name looks like it holds a credential."""
-    return bool(SENSITIVE_NAME.search(name)) or name.upper() in {e.upper() for e in extra}
-
-
-def secret_values(env: Mapping[str, str], extra: Iterable[str] = ()) -> list[str]:
+def secret_values(env: Mapping[str, str]) -> list[str]:
     """Return values of sensitive env vars long enough to be meaningful, longest first."""
-    extra = tuple(extra)
-    values = {
-        v for k, v in env.items() if len(v) >= MIN_SECRET_LEN and is_sensitive_name(k, extra)
-    }
+    values = {v for k, v in env.items() if len(v) >= MIN_SECRET_LEN and SENSITIVE_NAME.search(k)}
     return sorted(values, key=len, reverse=True)
 
 
-def find_tokens(text: str) -> list[str]:
-    """Return literal credential-shaped substrings found in text."""
-    return [m.group(0) for p in TOKEN_PATTERNS for m in p.finditer(text)]
-
-
-def redact(text: str, env: Mapping[str, str], extra: Iterable[str] = ()) -> str:
+def redact(text: str, env: Mapping[str, str]) -> str:
     """Replace sensitive env values and credential-shaped tokens with [REDACTED]."""
-    for value in secret_values(env, extra):
+    for value in secret_values(env):
         text = text.replace(value, "[REDACTED]")
     for pattern in TOKEN_PATTERNS:
         text = pattern.sub("[REDACTED]", text)
