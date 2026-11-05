@@ -1,0 +1,66 @@
+[project]
+name = "claude-code-firewall"
+version = "0.1.0"
+description = "PreToolUse firewall hook for Claude Code: blocks secret reads, credential exfiltration over the network and pushes to foreign git remotes, with a JSONL audit log."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Petr Hromádka", email = "109349500+petrhromadka@users.noreply.github.com" }]
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["claude-code", "hooks", "security", "exfiltration", "ai-agents", "firewall"]
+classifiers = [
+    "Topic :: Security",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/petrhromadka/claude-code-firewall"
+
+[project.scripts]
+cc-firewall = "cc_firewall.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "cc_firewall"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "C90", "PT", "SIM", "TID", "PL", "RUF", "D", "S", "PTH"]
+ignore = ["S603", "S607"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-positional-args = 5
+max-statements = 50
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "S101", "S105", "S106", "PLR2004"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+    "pytest-xdist==3.8.0",
+    "ruff==0.17.4",
+    "ty==0.0.98",
+]

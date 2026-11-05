@@ -1,0 +1,9 @@
+title = "claude-code-firewall gitleaks config"
+
+[extend]
+useDefault = true
+
+# Test fixtures build fake tokens at runtime; nothing real lives here.
+[allowlist]
+description = "test fixtures"
+paths = ['''tests/''']
