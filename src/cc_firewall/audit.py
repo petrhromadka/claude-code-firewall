@@ -12,6 +12,7 @@ from cc_firewall.sensitive import redact
 
 MAX_LOG_BYTES = 5 * 1024 * 1024
 MAX_INPUT_CHARS = 2000
+ROTATE_KEEP = 3
 
 
 def audit_path() -> Path:
@@ -22,16 +23,17 @@ def audit_path() -> Path:
 
 
 def build_record(hook: HookInput | None, decision: str, rules: tuple[str, ...]) -> dict[str, Any]:
-    """Build one audit record. The tool input is redacted before it is truncated."""
-    text = json.dumps(hook.tool_input if hook else {}, separators=(",", ":"), ensure_ascii=False)
+    """Build one audit record. The tool input is redacted before it is serialized and truncated."""
+    tool_input = redact(hook.tool_input, os.environ) if hook else {}
+    text = json.dumps(tool_input, separators=(",", ":"), ensure_ascii=False)
     return {
         "ts": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "session_id": hook.session_id if hook else "",
-        "cwd": hook.cwd if hook else "",
+        "cwd": redact(hook.cwd, os.environ) if hook else "",
         "tool": hook.tool if hook else "",
         "decision": decision,
         "rules": list(rules),
-        "input": redact(text, os.environ)[:MAX_INPUT_CHARS],
+        "input": text[:MAX_INPUT_CHARS],
     }
 
 
@@ -39,12 +41,27 @@ def log_decision(hook: HookInput | None, decision: str, rules: tuple[str, ...]) 
     """Append a record to the audit log. Any failure is swallowed; logging must not break."""
     with contextlib.suppress(Exception):
         path = audit_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > MAX_LOG_BYTES:
-            path.replace(path.with_name(path.name + ".1"))
-        line = json.dumps(build_record(hook, decision, rules), ensure_ascii=False)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+            _rotate(path)
+        line = json.dumps(build_record(hook, decision, rules), ensure_ascii=False) + "\n"
+        # backslashreplace turns a lone surrogate into a JSON escape, so the record is kept.
+        data = line.encode("utf-8", errors="backslashreplace")
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+
+
+def _rotate(path: Path) -> None:
+    """Shift ``audit.jsonl`` to ``.1`` and older generations up to ``.ROTATE_KEEP``."""
+    for n in range(ROTATE_KEEP - 1, 0, -1):
+        older = path.with_name(f"{path.name}.{n}")
+        if older.exists():
+            older.replace(path.with_name(f"{path.name}.{n + 1}"))
+    path.replace(path.with_name(f"{path.name}.1"))
 
 
 def read_records(tail: int, decision: str | None = None) -> list[str]:
