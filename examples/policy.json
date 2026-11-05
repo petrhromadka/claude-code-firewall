@@ -9,14 +9,24 @@
         "Read",
         "Edit",
         "MultiEdit",
-        "Write",
-        "NotebookEdit"
+        "Write"
       ],
       "field": "file_path",
       "glob": "**/.env*",
       "unless_glob": "**/.env.example",
       "decision": "deny",
       "reason": "Reading or editing .env files is disabled."
+    },
+    {
+      "id": "no-env-notebook",
+      "tools": [
+        "NotebookEdit"
+      ],
+      "field": "notebook_path",
+      "glob": "**/.env*",
+      "unless_glob": "**/.env.example",
+      "decision": "deny",
+      "reason": "Editing .env files is disabled."
     },
     {
       "id": "no-env-search",
@@ -77,6 +87,16 @@
     {
       "tool": "Read",
       "input": {"file_path": "/home/me/app/.env.example"},
+      "expect": "allow"
+    },
+    {
+      "tool": "NotebookEdit",
+      "input": {"notebook_path": "/home/me/app/.env", "new_source": "x"},
+      "expect": "deny"
+    },
+    {
+      "tool": "NotebookEdit",
+      "input": {"notebook_path": "/home/me/app/analysis.ipynb", "new_source": "x"},
       "expect": "allow"
     },
     {

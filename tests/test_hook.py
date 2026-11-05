@@ -279,6 +279,7 @@ def test_audit_input_is_redacted_and_truncated(home: Path, tmp_path: Path) -> No
 
 
 def test_log_command_filters_by_decision(home: Path) -> None:
+    assert run_cli(home, "log").stderr == f"no audit records in {home / 'audit.jsonl'}\n"
     run_cli(home, "hook", "--policy", str(EXAMPLE), stdin=payload("Bash", {"command": "ls"}))
     run_cli(home, "hook", "--policy", str(EXAMPLE), stdin=payload("Bash", {"command": "git push"}))
     result = run_cli(home, "log", "--decision", "ask")
@@ -319,4 +320,4 @@ def test_check_and_validate(home: Path) -> None:
     assert allowed.returncode == 0
     valid = run_cli(home, "validate", "--policy", str(EXAMPLE))
     assert valid.returncode == 0
-    assert "5 rules" in valid.stdout
+    assert "6 rules" in valid.stdout

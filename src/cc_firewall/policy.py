@@ -4,8 +4,10 @@ Only the user-level file (``~/.claude/cc-firewall.json``) is ever read. Project-
 files are deliberately not supported, so a cloned repository cannot weaken the policy.
 """
 
+import difflib
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -79,9 +81,9 @@ def parse_policy(data: object) -> Policy:
     if not isinstance(data, dict):
         raise PolicyError(["policy must be a JSON object"])
     errors: list[str] = []
-    unknown = sorted(set(data) - POLICY_KEYS)
+    unknown = _unknown_keys(data, POLICY_KEYS)
     if unknown:
-        errors.append(f"unknown policy keys: {', '.join(unknown)}")
+        errors.append(f"unknown policy keys: {unknown}")
     mode = data.get("mode", "enforce")
     if mode not in MODES:
         errors.append(f"'mode' must be one of {', '.join(MODES)}")
@@ -113,6 +115,17 @@ def slow_regex_warnings(policy: Policy) -> list[str]:
     ]
 
 
+def suggest(name: str, choices: Iterable[str]) -> str:
+    """Return `` (did you mean 'x'?)`` for the closest choice ignoring case, or ``""``."""
+    by_lower = {choice.lower(): choice for choice in choices}
+    match = difflib.get_close_matches(name.lower(), by_lower, n=1)
+    return f" (did you mean '{by_lower[match[0]]}'?)" if match else ""
+
+
+def _unknown_keys(raw: dict[str, Any], allowed: frozenset[str]) -> str:
+    return ", ".join(f"{key}{suggest(key, allowed)}" for key in sorted(set(raw) - allowed))
+
+
 def _parse_rules(raw: object, errors: list[str]) -> tuple[Rule, ...]:
     if not isinstance(raw, list):
         errors.append("'rules' must be a list")
@@ -132,9 +145,9 @@ def _parse_rule(raw: object, where: str, errors: list[str]) -> Rule | None:
         errors.append(f"{where}: rule must be an object")
         return None
     start = len(errors)
-    unknown = sorted(set(raw) - RULE_KEYS)
+    unknown = _unknown_keys(raw, RULE_KEYS)
     if unknown:
-        errors.append(f"{where}: unknown keys: {', '.join(unknown)}")
+        errors.append(f"{where}: unknown keys: {unknown}")
     if isinstance(raw.get("id"), str):
         where = f"{where} ({raw['id']})"
     text = {key: _text(raw, key, where, errors) for key in ("id", "field", "reason", "decision")}
@@ -177,9 +190,9 @@ def _parse_test(raw: object, where: str, errors: list[str]) -> PolicyTest | None
         errors.append(f"{where}: test must be an object")
         return None
     start = len(errors)
-    unknown = sorted(set(raw) - TEST_KEYS)
+    unknown = _unknown_keys(raw, TEST_KEYS)
     if unknown:
-        errors.append(f"{where}: unknown keys: {', '.join(unknown)}")
+        errors.append(f"{where}: unknown keys: {unknown}")
     tool = _text(raw, "tool", where, errors)
     expect = _text(raw, "expect", where, errors)
     if expect is not None and expect not in VERDICTS:

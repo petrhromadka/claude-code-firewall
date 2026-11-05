@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from cc_firewall import install as install_module
 from cc_firewall.cli import main
 from cc_firewall.install import (
     SelfTestError,
@@ -20,6 +21,14 @@ from cc_firewall.install import (
 # Mentions the firewall but does not run it, so install and uninstall must leave it alone.
 NOTIFY = {"type": "command", "command": "notify.sh 'cc_firewall: hook fired'"}
 HAS_POWERSHELL = bool(shutil.which("pwsh") or shutil.which("powershell"))
+AUDIT_HOME = Path(__file__).resolve().parent / "audit-home-unused"
+FAILED = f"cc-firewall: hook failed or timed out; see {AUDIT_HOME / 'watchdog.log'}"
+
+
+@pytest.fixture(autouse=True)
+def _audit_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the audit directory named in the installed command; nothing is written there."""
+    monkeypatch.setenv("CC_FIREWALL_HOME", str(AUDIT_HOME))
 
 
 def test_install_is_idempotent_and_preserves_settings(tmp_path: Path) -> None:
@@ -53,10 +62,12 @@ def test_install_is_idempotent_and_preserves_settings(tmp_path: Path) -> None:
         {"matcher": "*", "hooks": [hook_entry(policy)]},
     ]
     python, policy_arg = shlex.quote(sys.executable), shlex.quote(str(policy))
+    failed = shlex.quote(FAILED)
     assert entries[1]["hooks"][0] == {
         "type": "command",
         "shell": "bash",
-        "command": f"{python} -I -m cc_firewall hook --policy {policy_arg} || exit 2",
+        "command": f"{python} -I -m cc_firewall hook --policy {policy_arg} "
+        f"|| {{ echo {failed} >&2; exit 2; }}",
         "onFailure": "block",
         "timeout": 30,
     }
@@ -128,7 +139,7 @@ def test_powershell_command_quotes_paths_and_round_trips(tmp_path: Path) -> None
         "type": "command",
         "shell": "powershell",
         "command": f"& '{sys.executable}' -I -m cc_firewall hook --policy '{quoted}'; "
-        "if ($LASTEXITCODE -ne 0) { exit 2 }",
+        f"if ($LASTEXITCODE -ne 0) {{ [Console]::Error.WriteLine('{FAILED}'); exit 2 }}",
         "onFailure": "block",
         "timeout": 30,
     }
@@ -222,13 +233,46 @@ def test_self_test_gates_the_write(
     policy = tmp_path / "policy.json"
     policy.write_text('{"rules": []}', encoding="utf-8")
 
+    python = sys.executable
     monkeypatch.setattr(sys, "executable", str(tmp_path / "gone" / "python"))
-    with pytest.raises(SelfTestError, match="exited 2"):
+    with pytest.raises(SelfTestError, match="exited 2") as caught:
         install(settings, policy=policy, dry_run=False, shell=shell)
+    assert FAILED in str(caught.value)  # the line the command prints when the hook can't run
     assert not settings.exists()
 
-    monkeypatch.undo()
+    monkeypatch.setattr(sys, "executable", python)
     assert install(settings, policy=policy, dry_run=False, shell=shell).startswith("installed")
+
+
+def test_install_keeps_the_installed_shell_unless_told(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = tmp_path / "settings.json"
+    policy = tmp_path / "policy.json"
+    argv = ["install", "--settings", str(settings), "--policy", str(policy), "--skip-self-test"]
+    assert main([*argv, "--shell", "powershell"]) == 0
+    capsys.readouterr()
+
+    assert main(argv) == 0
+    assert capsys.readouterr().out == f"already installed in {settings}\n"
+    assert main([*argv, "--shell", "bash"]) == 0
+    assert capsys.readouterr().out == f"refreshed in {settings} (shell powershell -> bash)\n"
+    entries = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    assert entries == [{"matcher": "*", "hooks": [hook_entry(policy, "bash")]}]
+
+
+def test_self_test_names_a_shell_it_cannot_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = str(tmp_path / "bash.exe")
+    monkeypatch.setattr(install_module, "shell_argv", lambda _shell, cmd: [missing, "-c", cmd])
+    with pytest.raises(SelfTestError) as caught:
+        self_test(hook_entry(tmp_path / "policy.json"))
+    message = str(caught.value)
+    assert message.startswith(f"hook self-test could not start {missing}: ")
+    assert message.endswith(
+        ". Fix CLAUDE_CODE_GIT_BASH_PATH, install Git for Windows, or use --shell powershell"
+    )
 
 
 def test_uninstall_removes_only_firewall_handlers(tmp_path: Path) -> None:

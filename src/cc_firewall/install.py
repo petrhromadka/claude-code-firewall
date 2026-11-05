@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+from cc_firewall.audit import audit_path
+from cc_firewall.hook import WATCHDOG_LOG
 from cc_firewall.policy import PolicyError, load_policy, slow_regex_warnings
 
 SHELLS = ("bash", "powershell")
@@ -67,6 +69,8 @@ def hook_entry(policy: Path, shell: str = "bash") -> dict[str, Any]:
     ``& '<python>' ...; if ($LASTEXITCODE -ne 0) { exit 2 }``, which parses in PowerShell 5.1
     and 7 but is not valid ``sh``, so it only suits Windows machines without Git Bash or
     users who prefer PowerShell; the install self-test runs it through the same shell.
+    On a failure the command prints one line to stderr, naming the watchdog log: the hook
+    itself prints nothing when its watchdog ends it (see :func:`cc_firewall.hook.run_hook`).
     ``onFailure: "block"`` (Claude Code 2.1.295 and later) makes Claude Code block the tool
     call when the hook fails to run or times out, instead of reporting a non-blocking error.
     With it, a 30 second ``timeout`` ends a stuck hook sooner and still blocks. Older versions
@@ -74,14 +78,16 @@ def hook_entry(policy: Path, shell: str = "bash") -> dict[str, Any]:
     """
     if shell not in SHELLS:
         raise ValueError(f"shell must be one of {', '.join(SHELLS)}")
+    message = f"cc-firewall: hook failed or timed out; see {audit_path().parent / WATCHDOG_LOG}"
     if shell == "bash":
         argv = [sys.executable, "-I", "-m", "cc_firewall", "hook", "--policy", str(policy)]
-        command = f"{shlex.join(argv)} || exit 2"
+        command = f"{shlex.join(argv)} || {{ echo {shlex.quote(message)} >&2; exit 2; }}"
     else:
         python, policy_arg = _ps_quote(sys.executable), _ps_quote(str(policy))
         command = (
             f"& {python} -I -m cc_firewall hook --policy {policy_arg}; "
-            "if ($LASTEXITCODE -ne 0) { exit 2 }"
+            "if ($LASTEXITCODE -ne 0) { "
+            f"[Console]::Error.WriteLine({_ps_quote(message)}); exit 2 }}"
         )
     return {
         "type": "command",
@@ -349,8 +355,18 @@ def self_test(handler: dict[str, Any]) -> None:
                 timeout=SELF_TEST_TIMEOUT,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
             raise SelfTestError(f"hook self-test could not run: {exc}") from exc
+        except OSError as exc:
+            hint = ""
+            if shell == "bash" and not isinstance(handler.get("args"), list):
+                hint = (
+                    ". Fix CLAUDE_CODE_GIT_BASH_PATH, install Git for Windows, "
+                    "or use --shell powershell"
+                )
+            raise SelfTestError(
+                f"hook self-test could not start {argv[0]}: {exc.strerror or exc}{hint}"
+            ) from exc
     stdout = result.stdout.decode(errors="replace").strip()
     stderr = result.stderr.decode(errors="replace").strip()
     if result.returncode != 0:
@@ -380,8 +396,19 @@ def policy_warnings(policy: Path) -> list[str]:
         return []
 
 
+def _installed_shell(settings: dict[str, Any]) -> str | None:
+    handlers = our_handlers(settings)
+    shell = handlers[0].get("shell") if handlers else None
+    return shell if shell in SHELLS else None
+
+
 def install(
-    path: Path, *, policy: Path, dry_run: bool, shell: str = "bash", run_self_test: bool = True
+    path: Path,
+    *,
+    policy: Path,
+    dry_run: bool,
+    shell: str | None = None,
+    run_self_test: bool = True,
 ) -> str:
     """Install the hook into the settings file and return a status message.
 
@@ -389,6 +416,7 @@ def install(
     settings (such as tokens in ``env``) are not printed. Before writing, the policy must load
     and the hook command is run once through ``shell`` (see :func:`self_test`), unless
     ``run_self_test`` is False: a hook whose policy is missing or invalid denies every call.
+    Without ``shell`` the installed entry's shell is kept, else bash is used.
 
     Raises:
         ValueError: The existing settings file is not a JSON object, has odd hook types, or
@@ -397,6 +425,8 @@ def install(
             nothing was written.
     """
     settings = load_settings(path)
+    old_shell = _installed_shell(settings)
+    shell = shell or old_shell or "bash"
     expected = hook_entry(policy, shell)
     changed = add_hook(settings, expected)
     if dry_run:
@@ -413,6 +443,8 @@ def install(
             ) from exc
         self_test(expected)
     _save(path, settings)
+    if old_shell not in (None, shell):
+        return f"refreshed in {path} (shell {old_shell} -> {shell})"
     return f"installed in {path}"
 
 

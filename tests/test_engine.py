@@ -130,6 +130,16 @@ def test_invalid_policy_raises(data: object) -> None:
         parse_policy(data)
 
 
+def test_unknown_keys_suggest_the_closest_known_key() -> None:
+    with pytest.raises(PolicyError) as caught:
+        parse_policy({"Rules": [], "tests": [{"tool": "Bash", "inputs": {}, "expect": "allow"}]})
+    assert caught.value.errors == [
+        "unknown policy keys: Rules (did you mean 'rules'?)",
+        "tests[0]: unknown keys: inputs (did you mean 'input'?)",
+        "tests[0]: 'input' must be an object",
+    ]
+
+
 @pytest.mark.parametrize(
     ("cwd", "expected"),
     [

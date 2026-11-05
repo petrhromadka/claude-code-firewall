@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from cc_firewall import cli
 from cc_firewall.cli import main
 from cc_firewall.policy import parse_policy
 from cc_firewall.policytest import run_tests
@@ -47,7 +48,7 @@ def test_cases_pass_or_fail_against_the_rules_and_cwd() -> None:
 
 def test_cli_exit_code(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["test", "--policy", str(EXAMPLE)]) == 0
-    assert "10 passed, 0 failed" in capsys.readouterr().out
+    assert "12 passed, 0 failed" in capsys.readouterr().out
 
     failing = tmp_path / "policy.json"
     case = {"tool": "Bash", "input": {"command": "git push"}, "expect": "deny"}
@@ -57,6 +58,30 @@ def test_cli_exit_code(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> No
 
     assert main(["test", "--policy", str(tmp_path / "missing.json")]) == 2
     assert capsys.readouterr().err.startswith("error: ")
+
+
+def test_check_and_validate_explain_a_missing_policy_and_bad_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "cc-firewall.json"
+    monkeypatch.setattr(cli, "default_policy_path", lambda: missing)
+    assert main(["validate"]) == 2
+    assert capsys.readouterr().err == (
+        f"error: no policy at {missing}; copy examples/policy.json there (see README Quick start)\n"
+    )
+    assert main(["check", "--tool", "Bash", "--input", "{}"]) == 0
+    assert f"note: no policy file at {missing}; every call is allowed" in capsys.readouterr().err
+
+    check = ["check", "--policy", str(EXAMPLE), "--input"]
+    assert main([*check, '{"command": "ls"}', "--tool", "bash"]) == 0
+    assert capsys.readouterr().err == (
+        "note: no rule applies to tool 'bash'; tool names are case-sensitive "
+        "(did you mean 'Bash'?)\n"
+    )
+    assert main([*check, r'{"file_path": "C:\a"}', "--tool", "Read"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith(r"error: --input is not valid JSON: Invalid \escape")
+    assert err.endswith(r". Write a backslash as \\ or use forward slashes" + "\n")
 
 
 def test_check_and_validate_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
