@@ -55,7 +55,7 @@
           "items": { "type": "string" }
         },
         "field": {
-          "description": "The tool_input key to test, or * for every string value in the input.",
+          "description": "The tool_input key to test, or * for every string value and object key in the input.",
           "$ref": "#/$defs/nonEmptyString"
         },
         "glob": {
@@ -75,7 +75,7 @@
           "$ref": "#/$defs/nonEmptyString"
         },
         "cwd_glob": {
-          "description": "The rule applies only when the session's working directory matches this glob.",
+          "description": "The rule applies only when the session's working directory matches this glob; a trailing /** also matches the directory itself. A convenience for scoping rules, not a security boundary: the working directory follows the session, so a cd elsewhere moves it out of scope.",
           "$ref": "#/$defs/nonEmptyString"
         },
         "decision": {

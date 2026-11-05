@@ -63,7 +63,25 @@ def rule(rule_id: str, **overrides: Any) -> dict[str, Any]:
             {"file_path": "/a/.env.example"},
             "allow",
         ),
+        (
+            {"tools": ["Read"], "field": "file_path", "glob": "**/.env", "regex": None},
+            "Read",
+            {"file_path": "C:\\p\\.env."},
+            "deny",
+        ),
+        (
+            {"tools": ["Read"], "field": "file_path", "glob": "**/.env", "regex": None},
+            "Read",
+            {"file_path": "/p/.env::$DATA"},
+            "deny",
+        ),
         ({"tools": ["mcp__*"], "field": "*"}, "mcp__srv__tool", {"a": {"b": ["xx"]}}, "deny"),
+        (
+            {"tools": ["mcp__*"], "field": "*", "glob": "**/.env", "regex": None},
+            "mcp__srv__tool",
+            {"files": {"/p/.env": "read"}},
+            "deny",
+        ),
         ({"tools": ["mcp__*"], "field": "*"}, "Bash", {"a": "xx"}, "allow"),
         ({"unless_regex": "dry"}, "Bash", {"command": "x dry"}, "allow"),
         ({"unless_glob": "*dry*"}, "Bash", {"command": "x dry"}, "allow"),
@@ -126,6 +144,19 @@ def test_cwd_glob_limits_rule_to_matching_directories(cwd: str | None, expected:
     assert evaluate(policy, "Bash", {"command": "x"}, cwd=cwd).decision == expected
 
 
+@pytest.mark.parametrize(
+    ("cwd", "expected"),
+    [
+        ("/home/me/app", "deny"),
+        ("/home/me/app/src/lib", "deny"),
+        ("/home/me/appx", "allow"),
+    ],
+)
+def test_trailing_double_star_matches_the_directory_itself(cwd: str, expected: str) -> None:
+    policy = make_policy(rule("r", cwd_glob="/home/me/app/**"))
+    assert evaluate(policy, "Bash", {"command": "x"}, cwd=cwd).decision == expected
+
+
 def test_hook_passes_payload_cwd_to_rules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CC_FIREWALL_HOME", str(tmp_path / "home"))
     path = tmp_path / "policy.json"
@@ -153,8 +184,15 @@ def test_hook_passes_payload_cwd_to_rules(tmp_path: Path, monkeypatch: pytest.Mo
     ],
 )
 def test_slow_regex_warning(pattern: str, slow: bool) -> None:
-    policy = make_policy(rule("ok"), rule("r", regex=pattern))
-    expected = ["rules[1] (r): regex may be slow on some inputs"] if slow else []
+    policy = make_policy(rule("ok"), rule("r", regex=pattern), rule("u", unless_regex=pattern))
+    expected = (
+        [
+            "rules[1] (r): regex may be slow on some inputs",
+            "rules[2] (u): regex may be slow on some inputs",
+        ]
+        if slow
+        else []
+    )
     assert slow_regex_warnings(policy) == expected
 
 
@@ -170,3 +208,28 @@ def test_schema_lists_exactly_the_keys_the_validator_accepts() -> None:
     assert set(defs["test"]["properties"]) == TEST_KEYS
     for node in (schema, defs["rule"], defs["test"]):
         assert node["additionalProperties"] is False
+
+
+_WRONG_TYPE = {"string": 1, "array": "x", "object": "x"}
+_TEST_CASE = {"tool": "Bash", "input": {}, "expect": "allow"}
+
+
+@pytest.mark.parametrize(
+    ("kind", "key"),
+    [("rule", k) for k in sorted(RULE_KEYS)] + [("test", k) for k in sorted(TEST_KEYS)],
+)
+def test_validator_rejects_the_values_the_schema_rejects(kind: str, key: str) -> None:
+    defs = json.loads(SCHEMA.read_text(encoding="utf-8"))["$defs"]
+    prop = defs[kind]["properties"][key]
+    if "$ref" in prop:
+        prop = defs[prop["$ref"].rsplit("/", 1)[1]]
+    base = rule("a") if kind == "rule" else dict(_TEST_CASE)
+    if key == "glob":
+        del base["regex"]
+    wrap = "rules" if kind == "rule" else "tests"
+    wrong = _WRONG_TYPE.get(prop.get("type"), "not-in-enum")
+    for value in (None, wrong):
+        with pytest.raises(PolicyError):
+            parse_policy({wrap: [{**base, key: value}]})
+    if prop.get("type") == "string":
+        parse_policy({wrap: [{**base, key: "r.*"}]})

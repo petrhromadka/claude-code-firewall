@@ -143,7 +143,7 @@ def _parse_rule(raw: object, where: str, errors: list[str]) -> Rule | None:
     tools = _tools(raw, where, errors)
     glob = _text(raw, "glob", where, errors, required=False)
     regex = _regex(raw, "regex", where, errors)
-    if (raw.get("glob") is None) == (raw.get("regex") is None):
+    if ("glob" in raw) == ("regex" in raw):
         errors.append(f"{where}: set exactly one of 'glob' or 'regex'")
     unless_glob = _text(raw, "unless_glob", where, errors, required=False)
     unless_regex = _regex(raw, "unless_regex", where, errors)
@@ -196,11 +196,11 @@ def _parse_test(raw: object, where: str, errors: list[str]) -> PolicyTest | None
 def _text(
     raw: dict[str, Any], key: str, where: str, errors: list[str], *, required: bool = True
 ) -> str | None:
-    value = raw.get(key)
-    if value is None:
+    if key not in raw:
         if required:
             errors.append(f"{where}: '{key}' is required")
         return None
+    value = raw[key]
     if not isinstance(value, str) or not value:
         errors.append(f"{where}: '{key}' must be a non-empty string")
         return None

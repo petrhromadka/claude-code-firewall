@@ -23,18 +23,22 @@ def normalize_path(value: str) -> str:
 def glob_match(pattern: str, value: str) -> bool:
     """Match value against an fnmatch pattern after normalizing both as paths.
 
-    ``**/`` also matches zero directories, so ``**/.env`` matches a bare ``.env``.
+    ``**/`` also matches zero directories, so ``**/.env`` matches a bare ``.env``, and a
+    trailing ``/**`` matches zero components, so ``/app/**`` matches ``/app`` itself.
     """
     pattern = pattern.replace("\\", "/").lower()
     value = normalize_path(value)
-    return any(fnmatchcase(value, p) for p in {pattern, pattern.replace("**/", "")})
+    variants = {pattern, pattern.replace("**/", "")}
+    variants |= {p.removesuffix("/**") for p in variants if p.endswith("/**")}
+    return any(fnmatchcase(value, p) for p in variants)
 
 
 def _walk_strings(node: object) -> Iterator[str]:
     if isinstance(node, str):
         yield node
     elif isinstance(node, dict):
-        for child in node.values():
+        for key, child in node.items():
+            yield str(key)
             yield from _walk_strings(child)
     elif isinstance(node, list):
         for child in node:

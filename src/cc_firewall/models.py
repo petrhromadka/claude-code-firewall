@@ -19,7 +19,7 @@ class Rule:
     Attributes:
         id: Unique rule identifier, shown in reasons and in the audit log.
         tools: Tool names or fnmatch patterns (for example ``mcp__*``) the rule applies to.
-        field: Key in ``tool_input`` to inspect, or ``"*"`` for every string value.
+        field: Key in ``tool_input`` to inspect, or ``"*"`` for every string value and object key.
         decision: ``"deny"`` or ``"ask"``.
         reason: Human-readable explanation.
         glob: fnmatch pattern, case-insensitive, matched against slash-normalized text.
@@ -27,7 +27,8 @@ class Rule:
         unless_glob: Exception glob; a value matching it is skipped.
         unless_regex: Exception regex; a value matching it is skipped.
         cwd_glob: If set, the rule applies only when the session's working directory matches
-            this glob (same normalization as ``glob``).
+            this glob (same normalization as ``glob``). Scopes rules for convenience; it is not
+            a security boundary, because the working directory follows the session.
     """
 
     id: str

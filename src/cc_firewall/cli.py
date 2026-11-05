@@ -26,18 +26,22 @@ def _cmd_hook(args: argparse.Namespace) -> int:
     return hook_main(args.policy)
 
 
+def _fail(errors: Sequence[str]) -> int:
+    """Print each error with the ``error:`` prefix and return 2, the could-not-run exit code."""
+    sys.stderr.write("".join(f"error: {e}\n" for e in errors))
+    return 2
+
+
 def _cmd_check(args: argparse.Namespace) -> int:
     try:
         tool_input = json.loads(args.input)
         if not isinstance(tool_input, dict):
             raise ValueError("--input must be a JSON object")
-        policy = load_policy(args.policy)
+        policy = load_policy(args.policy, required=args.policy is not None)
     except PolicyError as exc:
-        sys.stderr.write("\n".join(exc.errors) + "\n")
-        return 2
+        return _fail(exc.errors)
     except ValueError as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 2
+        return _fail([str(exc)])
     verdict = evaluate(policy, args.tool, tool_input, cwd=args.cwd)
     sys.stdout.write(f"decision: {verdict.decision}\nmode: {policy.mode}\n")
     if verdict.rules:
@@ -47,10 +51,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     try:
-        policy = load_policy(args.policy)
+        policy = load_policy(args.policy, required=args.policy is not None)
     except PolicyError as exc:
-        sys.stderr.write("\n".join(f"error: {e}" for e in exc.errors) + "\n")
-        return 1
+        return _fail(exc.errors)
     for warning in slow_regex_warnings(policy):
         sys.stderr.write(f"warning: {warning}\n")
     sys.stdout.write(f"ok: {len(policy.rules)} rules, mode {policy.mode}\n")
@@ -61,8 +64,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
     try:
         policy = load_policy(args.policy, required=True)
     except PolicyError as exc:
-        sys.stderr.write("\n".join(f"error: {e}" for e in exc.errors) + "\n")
-        return 2
+        return _fail(exc.errors)
     results = run_tests(policy)
     for result in results:
         sys.stdout.write(result.describe() + "\n")
