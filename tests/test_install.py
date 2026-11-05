@@ -87,6 +87,8 @@ def test_powershell_command_quotes_paths_and_round_trips(tmp_path: Path) -> None
         "shell": "powershell",
         "command": f"& '{sys.executable}' -I -m cc_firewall hook --policy '{quoted}'; "
         "if ($LASTEXITCODE -ne 0) { exit 2 }",
+        "onFailure": "block",
+        "timeout": 30,
     }
     argv = hook_argv(entry)
     assert argv[0] == sys.executable

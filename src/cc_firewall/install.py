@@ -37,6 +37,9 @@ def _ps_quote(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
+HOOK_TIMEOUT = 30
+
+
 def hook_entry(policy: Path, shell: str = "bash") -> dict[str, Any]:
     """Return the hook handler that runs the firewall with ``policy`` (an absolute path).
 
@@ -54,8 +57,10 @@ def hook_entry(policy: Path, shell: str = "bash") -> dict[str, Any]:
     ``& '<python>' ...; if ($LASTEXITCODE -ne 0) { exit 2 }``, which parses in PowerShell 5.1
     and 7 but is not valid ``sh``, so it only suits Windows machines without Git Bash or
     users who prefer PowerShell; the install self-test runs it through the same shell.
-    No ``timeout`` is set: the documented default is 600 seconds, and a shorter one would only
-    let the tool run sooner.
+    ``onFailure: "block"`` (Claude Code 2.1.295 and later) makes Claude Code block the tool
+    call when the hook fails to run or times out, instead of reporting a non-blocking error.
+    With it, a 30 second ``timeout`` ends a stuck hook sooner and still blocks. Older versions
+    rely on the ``exit 2`` fallback alone, and a hook timeout there lets the tool run.
     """
     if shell not in SHELLS:
         raise ValueError(f"shell must be one of {', '.join(SHELLS)}")
@@ -68,7 +73,13 @@ def hook_entry(policy: Path, shell: str = "bash") -> dict[str, Any]:
             f"& {python} -I -m cc_firewall hook --policy {policy_arg}; "
             "if ($LASTEXITCODE -ne 0) { exit 2 }"
         )
-    return {"type": "command", "shell": shell, "command": command}
+    return {
+        "type": "command",
+        "shell": shell,
+        "command": command,
+        "onFailure": "block",
+        "timeout": HOOK_TIMEOUT,
+    }
 
 
 def hook_argv(handler: dict[str, Any]) -> list[str]:
