@@ -29,15 +29,17 @@ allowed.
 Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Works on Linux, macOS and
 Windows. No runtime dependencies beyond the standard library.
 
-Install the tool, put a policy in place, then add the hook:
+Install the tool, put a policy in place, add the hook, then check the result:
 
 ```sh
 uv tool install git+https://github.com/petrhromadka/claude-code-firewall
 curl -fsSL -o ~/.claude/cc-firewall.json \
   https://raw.githubusercontent.com/petrhromadka/claude-code-firewall/main/examples/policy.json
 cc-firewall validate            # ok: 5 rules, mode enforce
+cc-firewall test                # 10 passed, 0 failed
 cc-firewall install --dry-run   # print the PreToolUse section it would write
 cc-firewall install             # add the hook to ~/.claude/settings.json
+cc-firewall doctor              # OK/FAIL checklist of the installed hook
 ```
 
 `install` adds one `PreToolUse` entry with matcher `*` to `~/.claude/settings.json`:
@@ -45,7 +47,10 @@ cc-firewall install             # add the hook to ~/.claude/settings.json
 ```json
 {
   "type": "command",
-  "command": "'/home/me/.local/share/uv/tools/claude-code-firewall/bin/python' -I -m cc_firewall hook --policy '/home/me/.claude/cc-firewall.json' || exit 2"
+  "shell": "bash",
+  "command": "'/home/me/.local/share/uv/tools/claude-code-firewall/bin/python' -I -m cc_firewall hook --policy '/home/me/.claude/cc-firewall.json' || exit 2",
+  "onFailure": "block",
+  "timeout": 30
 }
 ```
 
@@ -53,14 +58,36 @@ cc-firewall install             # add the hook to ~/.claude/settings.json
   replace the hook's code.
 - The policy path is fixed at install time, so changing `HOME` can't point the hook at a missing
   file.
-- `|| exit 2` blocks the call if the interpreter or the package is gone. Claude Code treats any
-  other non-zero exit as a non-blocking error and would run the tool.
+- `|| exit 2` and `onFailure: "block"` make a hook that can't run block the call instead of
+  letting it through. See [Fail closed](#fail-closed).
+
+Before writing, `install` runs the exact command once through that shell with a harmless `Read`
+call. If it fails, nothing is written, and you get its stderr and a hint. `--skip-self-test`
+writes it anyway. The self-test checks that the command runs, not that your policy is right:
+installing before the policy file exists passes and leaves a hook that denies every call, which
+`doctor` reports.
 
 The write is atomic and the previous file is kept as `settings.json.bak`. Running `install` again
-changes nothing, or refreshes an entry whose interpreter path has moved. Use `--settings PATH` to
-target another settings file.
+changes nothing, or refreshes an entry that has gone stale, such as a moved interpreter. Use
+`--settings PATH` to target another settings file. `uninstall` removes only the firewall's
+handlers, with the same atomic write and `.bak` copy.
 
-The [starter policy](examples/policy.json) has five rules:
+After installing, `doctor` should show every line `OK`:
+
+```console
+$ cc-firewall doctor
+OK   settings: /home/me/.claude/settings.json is valid JSON
+OK   hook: current, shell bash
+OK   interpreter: /home/me/.local/share/uv/tools/claude-code-firewall/bin/python
+OK   self-test: hook command ran and exited 0
+OK   policy: /home/me/.claude/cc-firewall.json: 5 rules, mode enforce
+OK   audit: /home/me/.claude/cc-firewall is writable
+```
+
+It exits `1` if any line is `FAIL`, for example `FAIL hook: no cc-firewall hook in ...; run
+cc-firewall install` or `FAIL policy: policy file ... does not exist`.
+
+The [starter policy](examples/policy.json) has five rules and ten tests:
 
 | id | Tools | Decision | What it does |
 | --- | --- | --- | --- |
@@ -90,17 +117,43 @@ mode: enforce
 To try a new policy without blocking anything, set `"mode": "audit"` first. Read the log for a
 while, then switch to `"enforce"`.
 
+### Windows
+
+Claude Code runs hooks in Git Bash when it is installed, so the default `--shell bash` entry
+works there; the self-test finds Git Bash next to `git` or through `CLAUDE_CODE_GIT_BASH_PATH`.
+Without Git Bash, install with `--shell powershell`. That writes a command that parses in Windows
+PowerShell 5.1 and PowerShell 7 and turns any non-zero exit into `exit 2`:
+
+```json
+{
+  "type": "command",
+  "shell": "powershell",
+  "command": "& 'C:\\Users\\me\\AppData\\Roaming\\uv\\tools\\claude-code-firewall\\Scripts\\python.exe' -I -m cc_firewall hook --policy 'C:\\Users\\me\\.claude\\cc-firewall.json'; if ($LASTEXITCODE -ne 0) { exit 2 }",
+  "onFailure": "block",
+  "timeout": 30
+}
+```
+
+In Git Bash, an argument that looks like a POSIX path, such as `check --cwd /home/me/app`, is
+rewritten to a Windows path before `cc-firewall` sees it. Pass a Windows path, or set
+`MSYS_NO_PATHCONV=1`.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `cc-firewall hook [--policy P]` | The hook entry point. Reads the hook JSON on stdin and prints a decision. Claude Code runs it; you don't. |
-| `cc-firewall check --tool NAME --input JSON [--policy P]` | Evaluates one tool call. Logs nothing. Exits `0` for allow, `1` for ask or deny. |
-| `cc-firewall validate [--policy P]` | Reports every error in the policy file and exits `1` if it has any. |
-| `cc-firewall install [--settings PATH] [--policy P] [--dry-run]` | Adds or refreshes the hook in Claude Code settings. Writes a `.bak` first. |
-| `cc-firewall log [--tail N] [--decision D]` | Prints the last N audit records (default 20). `D` is `deny`, `ask`, `allow`, `would-deny` or `would-ask`, matched exactly. |
+| `cc-firewall check --tool NAME --input JSON [--cwd DIR] [--policy P]` | Evaluates one tool call. `--cwd` sets the working directory for `cwd_glob` rules. Logs nothing. Exits `0` for allow, `1` for ask or deny. |
+| `cc-firewall validate [--policy P]` | Reports every error in the policy file and exits `1` if it has any. Warns about regexes that may backtrack. |
+| `cc-firewall test [--policy P]` | Runs the policy's `tests`. Exits `1` if any fails, `2` if the policy is invalid. |
+| `cc-firewall install [--settings PATH] [--policy P] [--shell bash\|powershell] [--skip-self-test] [--dry-run]` | Adds or refreshes the hook in Claude Code settings after a self-test. Writes a `.bak` first. |
+| `cc-firewall uninstall [--settings PATH] [--dry-run]` | Removes the firewall's handlers and the entries they leave empty. Writes a `.bak` first. |
+| `cc-firewall doctor [--settings PATH] [--policy P]` | Checks the settings file, hook entry, interpreter, a live run of the hook, the policy and the audit directory. Exits `1` on any `FAIL`. |
+| `cc-firewall log [--tail N] [--decision D] [--rule ID]` | Prints the last N audit records (default 20). `D` is `deny`, `ask`, `allow`, `would-deny` or `would-ask`, matched exactly; `--rule` keeps records that name that rule. |
+| `cc-firewall stats [--since YYYY-MM-DD]` | Counts audit records per decision, rule and tool, from that UTC day on. |
 
-`--policy` defaults to `~/.claude/cc-firewall.json`.
+`--policy` defaults to `~/.claude/cc-firewall.json`; for `doctor` it defaults to the file the
+installed hook reads.
 
 ## Policy reference
 
@@ -109,6 +162,7 @@ purpose, so a repository you clone cannot weaken your rules.
 
 ```json
 {
+  "$schema": "https://raw.githubusercontent.com/petrhromadka/claude-code-firewall/main/schema/policy.schema.json",
   "mode": "enforce",
   "log_allowed": true,
   "rules": [
@@ -120,17 +174,26 @@ purpose, so a repository you clone cannot weaken your rules.
       "decision": "ask",
       "reason": "Confirm git push."
     }
+  ],
+  "tests": [
+    {"tool": "Bash", "input": {"command": "cd app && git push origin feature"}, "expect": "ask"}
   ]
 }
 ```
+
+`$schema` points your editor at [schema/policy.schema.json](schema/policy.schema.json) (JSON
+Schema draft 2020-12), which gives completion, descriptions and errors for every key while you
+edit. `cc-firewall` ignores the key.
 
 Top-level keys:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `$schema` | string | none | Schema URL or path, for editors. |
 | `mode` | `"enforce"` or `"audit"` | `"enforce"` | `enforce` returns deny/ask to Claude Code. `audit` only logs `would-deny` / `would-ask` and lets every call run. |
 | `log_allowed` | bool | `true` | Also log calls that no rule matched. |
 | `rules` | list | `[]` | The rules, described below. |
+| `tests` | list | `[]` | Test cases for `cc-firewall test`, described below. The hook never reads them. |
 
 Rule keys:
 
@@ -142,6 +205,7 @@ Rule keys:
 | `glob` | one of `glob` / `regex` | fnmatch pattern matched against the whole value, treated as a path. Case-insensitive; `\` and `/` are treated the same; `**/` also matches no directory, so `**/.env` matches `.env`. Windows aliases of one file are folded first: trailing dots and spaces (`.env.`) and NTFS stream suffixes (`.env::$DATA`). Prefer `glob` over `regex` for paths. |
 | `regex` | one of `glob` / `regex` | Python regular expression, matched anywhere in the value (`re.search`). Case-sensitive unless you add `(?i)`. |
 | `unless_glob`, `unless_regex` | no | An exception. A value that matches it does not trigger the rule. |
+| `cwd_glob` | no | The rule applies only when the session's working directory matches this glob, with the same path handling as `glob`. A call without a `cwd` never matches it. |
 | `decision` | yes | `"deny"` or `"ask"`. |
 | `reason` | yes | Text shown to Claude (deny) or to you in the prompt (ask). |
 
@@ -151,13 +215,16 @@ How the decision is made:
   says `ask`, you are asked. If none match, the call is allowed.
 - The reason lists every matching rule, for example
   `cc-firewall: [confirm-push] Confirm git push.`
-- An invalid policy file, malformed hook input or an internal error **denies every call** (fail
-  closed). Fix the file in an editor outside Claude Code, then run `cc-firewall validate`.
-- The installed hook passes `--policy` explicitly, and an explicit policy file that doesn't exist
-  also denies every call. Only without `--policy` does a missing default file mean "allow and
-  log".
 - Unknown keys, a bad regex, or a rule with both or neither of `glob` and `regex` make the
-  policy invalid.
+  policy invalid, and an invalid policy denies every call (see [Fail closed](#fail-closed)).
+- `validate` warns about a regex with a nested quantifier, such as `(a+)+`, which can backtrack
+  for a long time on crafted input. It is a heuristic and doesn't fail validation:
+
+```console
+$ cc-firewall validate --policy slow.json
+warning: rules[1] (slow): regex may be slow on some inputs
+ok: 2 rules, mode enforce
+```
 
 The hook always exits `0`. For a deny or ask it prints this on stdout; for an allow it prints
 nothing:
@@ -171,6 +238,56 @@ nothing:
   }
 }
 ```
+
+### Policy tests
+
+Each entry in `tests` is a simulated call and the decision the policy must give it. `tool`,
+`input` (the `tool_input` object) and `expect` (`allow`, `ask` or `deny`) are required; `cwd` is
+optional and feeds `cwd_glob` rules. Tests ignore `mode`, so an audit-mode policy is tested as if
+it enforced. Run them after every edit. With this rule and two tests:
+
+```json
+{
+  "rules": [
+    {"id": "repo-push", "tools": ["Bash"], "field": "command", "regex": "\\bgit\\b.*\\bpush\\b",
+     "cwd_glob": "/home/me/work/**", "decision": "deny", "reason": "No pushes from work repos."}
+  ],
+  "tests": [
+    {"tool": "Bash", "input": {"command": "git push"}, "cwd": "/home/me/work/api", "expect": "deny"},
+    {"tool": "Bash", "input": {"command": "git push"}, "cwd": "/home/me/play", "expect": "deny"}
+  ]
+}
+```
+
+the second test fails, because `cwd_glob` limits the rule to `/home/me/work`:
+
+```console
+$ cc-firewall test --policy work.json
+PASS tests[0] Bash {"command": "git push"} cwd=/home/me/work/api -> deny (rules: repo-push)
+FAIL tests[1] Bash {"command": "git push"} cwd=/home/me/play expected deny, got allow (rules: none)
+1 passed, 1 failed
+```
+
+## Fail closed
+
+When `cc-firewall` can't decide, the call is blocked:
+
+- **An invalid policy, malformed hook input or an internal error denies every call.** Fix the
+  file in an editor outside Claude Code, then run `cc-firewall validate`.
+- **A missing policy file denies every call** when `--policy` is given, as in the installed hook.
+  Only without `--policy` does a missing default file mean "allow and log", recorded with
+  `"policy": "missing"`.
+- **A slow evaluation is denied, not run.** After 5 seconds a stall, such as a blocked read, ends
+  in a deny with the reason `cc-firewall: evaluation exceeded deadline, denying tool call`. A
+  backtracking regex holds Python's interpreter lock, so the hook can't answer; one second later
+  a `faulthandler` watchdog ends the process with status 1. `CC_FIREWALL_DEADLINE` (seconds) can
+  shorten the deadline for tests but not lengthen it.
+- **A hook that can't run blocks the call.** Claude Code treats exit codes other than 0 and 2 as
+  non-blocking errors and runs the tool, so the installed command turns any other exit (a missing
+  interpreter, an uninstalled package, the watchdog) into `exit 2`. On Claude Code 2.1.295 and
+  later, `onFailure: "block"` also blocks the call when the hook fails to start or times out, and
+  the 30 second `timeout` ends a stuck hook sooner. Older versions rely on `exit 2` alone; a hook
+  killed by their timeout lets the tool run.
 
 ## Audit log
 
@@ -194,6 +311,8 @@ that finds the lock held skips rotation and appends. On Linux and macOS the dire
 | `rules` | Ids of the matching rules |
 | `input` | `tool_input` as JSON, redacted, then cut to 2000 characters; empty in the record for a call that hit the deadline |
 
+A process ended by the watchdog writes no record.
+
 Redaction replaces two kinds of text with `[REDACTED]`. The first is the value of any environment
 variable whose name looks like a credential, such as `*TOKEN*`, `*SECRET*` or `*API_KEY*`. The
 second is any text shaped like a common credential: GitHub, GitLab, npm, Slack, Anthropic and
@@ -204,6 +323,24 @@ value, such as a numeric PIN, becomes a redacted string. The `cwd` field is reda
 best-effort. A secret in some other format can still reach the log.
 
 The hook never fails because of logging. If a record can't be written, the decision still stands.
+
+`log --rule ID` shows the records of one rule, and `stats` summarizes the log and its rotated
+files, skipping malformed lines:
+
+```console
+$ cc-firewall stats --since 2026-11-05
+records: 4
+decisions:
+  ask    2
+  deny   1
+  allow  1
+rules:
+  confirm-push  2
+  no-env-file   1
+top 5 tools:
+  Bash  2
+  Read  2
+```
 
 ## How it fits with Claude Code's own controls
 
@@ -234,22 +371,18 @@ model.
   indirection can all express the same action with different text. A rule covers exactly what
   its pattern matches; treat the starter rules as guard rails against accidents, not against an
   adversary.
-- **A slow evaluation is denied, not run.** Claude Code cancels a hook after its timeout and runs
-  the tool, so the hook stops itself first. After 5 seconds a stall such as a blocked read ends
-  in a deny with the reason `evaluation exceeded deadline`. A regex that backtracks, such as
-  `(a+)+` on crafted input, holds Python's interpreter lock, so the hook can't answer; one second
-  later a watchdog ends the process with status 1, which the installed `|| exit 2` turns into a
-  block. A hook command written by hand without `|| exit 2` fails open in that case. Keep regexes
-  simple. `CC_FIREWALL_DEADLINE` (seconds) shortens the deadline for tests; it can't lengthen it.
-- **On Windows the hook command needs Git Bash**, which Claude Code uses to run hooks when it is
-  installed. The `'...' || exit 2` form doesn't parse in Windows PowerShell 5.1.
 - **It doesn't see what runs.** A script the agent writes and then executes is checked only as
   its command line, never as what the script does.
+- **A hand-written hook entry can fail open.** Without `|| exit 2` (or the PowerShell
+  equivalent) and on a Claude Code version without `onFailure`, a crash or the watchdog's exit
+  lets the tool run. Use `install`, and keep regexes simple.
 - **It's only as safe as `~/.claude`.** Anything that can edit `~/.claude/settings.json` or the
   policy file can turn the firewall off, and that includes the agent if your permissions let
   it.
 - **The audit log is a local file.** It is not tamper-evident, and its redaction is best-effort.
-- **It costs time on every call.** Each tool call starts a Python process.
+- **It costs time on every call.** Each tool call starts a Python process. The hook path skips
+  the CLI's imports, but interpreter startup remains; on some Windows machines it alone takes
+  about a second.
 
 ## Development
 

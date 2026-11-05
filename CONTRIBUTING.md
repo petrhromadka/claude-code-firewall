@@ -34,6 +34,11 @@ end-of-file and ruff fixes, plus [gitleaks](https://github.com/gitleaks/gitleaks
   starts with a test that reproduces the bug.
 - The hook must fail closed. An error during evaluation, or an invalid policy, must deny the
   call, never allow it.
+- A new policy key goes into `policy.py` and
+  [schema/policy.schema.json](schema/policy.schema.json) together; a test fails when they
+  differ.
+- A change to [examples/policy.json](examples/policy.json) comes with entries in its `tests`
+  list. Check it with `uv run cc-firewall test --policy examples/policy.json`.
 - Never put real tokens or credentials in tests or fixtures. Build credential-shaped strings
   at runtime if a test needs one.
 - Add a line to the unreleased section at the top of [CHANGELOG.md](CHANGELOG.md) for any

@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-firewall"
-version = "0.1.0"
+version = "0.2.0"
 description = "Declarative policy firewall for Claude Code tool calls: deny or ask per rule, with a redacted JSONL audit log."
 readme = "README.md"
 license = "MIT"

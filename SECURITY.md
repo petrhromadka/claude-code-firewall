@@ -13,6 +13,10 @@ before the call runs. It cannot see what a script that the agent wrote does once
 pattern-based rule can be worked around by rephrasing a command. Use it together with Claude
 Code's permission settings and its sandbox, not instead of them.
 
-In scope: the hook allowing a call that a valid policy rule matches, a crash or malformed policy
-that makes the hook fail open, secrets that reach the audit log unredacted, and `install`
-corrupting or dropping existing settings.
+In scope: the hook allowing a call that a valid policy rule matches; a crash, a slow evaluation
+or a malformed policy that makes a hook entry written by `install` fail open; secrets that reach
+the audit log unredacted; and `install` or `uninstall` corrupting or dropping existing settings.
+
+Known and out of scope: a command rephrased so that no rule's pattern matches it, and a hook
+entry written by hand without the `exit 2` fallback, on a Claude Code version without
+`onFailure: "block"`, letting the tool run when the hook crashes or is killed.
