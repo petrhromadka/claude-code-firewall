@@ -1,11 +1,14 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from cc_firewall.install import install
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "policy.json"
@@ -123,13 +126,39 @@ def test_invalid_policy_and_bad_payload_fail_closed(home: Path, tmp_path: Path) 
         assert out["permissionDecisionReason"].startswith("cc-firewall:")
 
 
-def test_missing_policy_allows_and_logs(home: Path, tmp_path: Path) -> None:
+def test_explicit_missing_policy_denies(home: Path, tmp_path: Path) -> None:
     missing = tmp_path / "nope.json"
     result = run_cli(
         home, "hook", "--policy", str(missing), stdin=payload("Bash", {"command": "ls"})
     )
-    assert result.stdout == ""
-    assert records(home)[0]["decision"] == "allow"
+    out = json.loads(result.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert "does not exist" in out["permissionDecisionReason"]
+
+
+def test_installed_command_ignores_modules_planted_in_cwd(home: Path, tmp_path: Path) -> None:
+    rule = {"id": "all", "tools": ["*"], "field": "*", "regex": ".", "decision": "deny"}
+    policy = write_policy(tmp_path, rules=[{**rule, "reason": "deny all"}])
+    project = tmp_path / "project"
+    (project / "cc_firewall").mkdir(parents=True)
+    (project / "cc_firewall" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "cc_firewall" / "__main__.py").write_text("raise SystemExit(0)", encoding="utf-8")
+    settings = tmp_path / "settings.json"
+    install(settings, policy=policy, dry_run=False)
+    entry = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]
+    argv = shlex.split(entry["hooks"][0]["command"])
+    argv = argv[: argv.index("||")]
+    result = subprocess.run(
+        argv,
+        input=payload("Bash", {"command": "ls"}),
+        capture_output=True,
+        text=True,
+        cwd=project,
+        env={**os.environ, "CC_FIREWALL_HOME": str(home)},
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_audit_input_is_redacted_and_truncated(home: Path, tmp_path: Path) -> None:

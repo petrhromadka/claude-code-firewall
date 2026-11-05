@@ -10,12 +10,11 @@ from cc_firewall.audit import read_records
 from cc_firewall.engine import evaluate
 from cc_firewall.hook import run_hook
 from cc_firewall.install import default_settings_path, install
-from cc_firewall.policy import PolicyError, load_policy
+from cc_firewall.policy import PolicyError, default_policy_path, load_policy
 
 
 def _cmd_hook(args: argparse.Namespace) -> int:
-    raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    output = run_hook(raw, args.policy)
+    output = run_hook(sys.stdin.buffer, args.policy)
     if output is not None:
         sys.stdout.write(output + "\n")
     return 0
@@ -52,7 +51,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 def _cmd_install(args: argparse.Namespace) -> int:
     try:
-        sys.stdout.write(install(args.settings, dry_run=args.dry_run) + "\n")
+        policy = (args.policy or default_policy_path()).absolute()
+        sys.stdout.write(install(args.settings, policy=policy, dry_run=args.dry_run) + "\n")
     except ValueError as exc:  # json.JSONDecodeError is a ValueError
         sys.stderr.write(f"error: {exc}\n")
         return 2
@@ -71,7 +71,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     hook = sub.add_parser("hook", help="PreToolUse hook entry point (reads JSON on stdin)")
     hook.add_argument(
-        "--policy", type=Path, help="policy file (default ~/.claude/cc-firewall.json)"
+        "--policy",
+        type=Path,
+        help="policy file, deny all if missing "
+        "(default ~/.claude/cc-firewall.json, allow all if missing)",
     )
     hook.set_defaults(func=_cmd_hook)
 
@@ -87,7 +90,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     inst = sub.add_parser("install", help="add the hook to Claude Code settings")
     inst.add_argument("--settings", type=Path, default=default_settings_path())
-    inst.add_argument("--dry-run", action="store_true", help="print the result, write nothing")
+    inst.add_argument(
+        "--policy",
+        type=Path,
+        help="policy file the hook reads, stored as an absolute path "
+        "(default ~/.claude/cc-firewall.json)",
+    )
+    inst.add_argument(
+        "--dry-run", action="store_true", help="print the new PreToolUse section, write nothing"
+    )
     inst.set_defaults(func=_cmd_install)
 
     log = sub.add_parser("log", help="print audit records")

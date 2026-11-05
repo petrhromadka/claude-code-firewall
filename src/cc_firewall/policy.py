@@ -31,16 +31,19 @@ def default_policy_path() -> Path:
     return Path.home() / ".claude" / "cc-firewall.json"
 
 
-def load_policy(path: Path | None = None) -> Policy:
-    """Load and validate the policy. A missing file yields an empty policy.
+def load_policy(path: Path | None = None, *, required: bool = False) -> Policy:
+    """Load and validate the policy. A missing file yields an empty policy unless ``required``.
 
     Raises:
-        PolicyError: The file cannot be read, is not JSON, or fails validation.
+        PolicyError: The file cannot be read, is not JSON, fails validation, or is missing
+            while ``required`` is set.
     """
     path = path or default_policy_path()
     try:
         text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        if required:
+            raise PolicyError([f"policy file {path} does not exist"]) from exc
         return Policy()
     except (OSError, UnicodeDecodeError) as exc:
         raise PolicyError([f"cannot read {path}: {exc}"]) from exc
