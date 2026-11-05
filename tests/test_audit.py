@@ -1,6 +1,8 @@
 import json
+import os
 import stat
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +19,7 @@ def log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def write(tool_input: dict[str, Any], cwd: str = "/work") -> None:
-    audit.log_decision(HookInput("Bash", tool_input, "s1", cwd), "deny", ("r1",))
+    audit.log_decision(HookInput("Bash", tool_input, "s1", cwd), "deny", ("r1",), "ok")
 
 
 def last_record(log: Path) -> dict[str, Any]:
@@ -39,6 +41,19 @@ def test_env_secret_with_escaped_chars_never_logged(
     assert secret not in record["input"]
     assert secret not in record["cwd"]
     assert "[REDACTED]" in record["input"]
+
+
+def test_numeric_env_secret_redacted_in_numbers(log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BANK_PIN_SECRET", "73019284")
+    write({"pin": 73019284, "nested": [{"id": 1.5, "acct": 9973019284}], "ok": 42, "b": True})
+    record = last_record(log)
+    assert "73019284" not in record["input"]
+    assert json.loads(record["input"]) == {
+        "pin": "[REDACTED]",
+        "nested": [{"id": 1.5, "acct": "99[REDACTED]"}],
+        "ok": 42,
+        "b": True,
+    }
 
 
 def test_private_key_body_redacted(log: Path) -> None:
@@ -66,9 +81,29 @@ def test_rotation_keeps_three_generations(log: Path, monkeypatch: pytest.MonkeyP
     assert "run 1" in (log.parent / "audit.jsonl.3").read_text(encoding="utf-8")
 
 
+def test_rotation_lock_held_skips_rotation_but_keeps_record(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(audit, "MAX_LOG_BYTES", 10)
+    write({"command": "first"})
+    lock = log.parent / "audit.lock"
+    lock.touch()
+    write({"command": "while locked"})
+    assert sorted(p.name for p in log.parent.iterdir()) == ["audit.jsonl", "audit.lock"]
+    assert "while locked" in log.read_text(encoding="utf-8")
+    old = time.time() - 2 * audit.STALE_LOCK_SECONDS
+    os.utime(lock, (old, old))
+    write({"command": "after stale"})
+    assert sorted(p.name for p in log.parent.iterdir()) == ["audit.jsonl", "audit.jsonl.1"]
+    assert "after stale" in log.read_text(encoding="utf-8")
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
 def test_log_file_and_dir_are_private(log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(audit, "MAX_LOG_BYTES", 10)
+    log.parent.mkdir(mode=0o700)
+    log.touch(mode=0o644)
+    log.chmod(0o644)  # a pre-existing log with looser permissions is tightened
     write({"command": "ls"})
     write({"command": "ls"})
     assert stat.S_IMODE(log.parent.stat().st_mode) == 0o700

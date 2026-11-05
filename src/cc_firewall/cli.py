@@ -8,16 +8,13 @@ from pathlib import Path
 
 from cc_firewall.audit import read_records
 from cc_firewall.engine import evaluate
-from cc_firewall.hook import run_hook
+from cc_firewall.hook import main as hook_main
 from cc_firewall.install import default_settings_path, install
 from cc_firewall.policy import PolicyError, default_policy_path, load_policy
 
 
 def _cmd_hook(args: argparse.Namespace) -> int:
-    output = run_hook(sys.stdin.buffer, args.policy)
-    if output is not None:
-        sys.stdout.write(output + "\n")
-    return 0
+    return hook_main(args.policy)
 
 
 def _cmd_check(args: argparse.Namespace) -> int:

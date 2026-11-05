@@ -176,11 +176,12 @@ nothing:
 
 Records go to `~/.claude/cc-firewall/audit.jsonl`, one JSON object per line. Set
 `CC_FIREWALL_HOME` to use another directory. Above 5 MB the file is rotated, keeping three
-previous files (`audit.jsonl.1` to `.3`). On Linux and macOS the directory is created `0700` and
-the files `0600`.
+previous files (`audit.jsonl.1` to `.3`). A hook rotates only while it holds `audit.lock`; a hook
+that finds the lock held skips rotation and appends. On Linux and macOS the directory is created
+`0700` and the files `0600`, and an existing log with looser permissions is set back to `0600`.
 
 ```json
-{"ts": "2026-11-05T14:02:11Z", "session_id": "3f0c9a52-8a1e-4c55-9d1b-2b7f0e6a41d7", "cwd": "/home/me/app", "tool": "Bash", "decision": "ask", "rules": ["confirm-push"], "input": "{\"command\":\"GH_TOKEN=[REDACTED] git push origin main\"}"}
+{"ts": "2026-11-05T14:02:11Z", "session_id": "3f0c9a52-8a1e-4c55-9d1b-2b7f0e6a41d7", "cwd": "/home/me/app", "tool": "Bash", "decision": "ask", "policy": "ok", "rules": ["confirm-push"], "input": "{\"command\":\"GH_TOKEN=[REDACTED] git push origin main\"}"}
 ```
 
 | Field | Meaning |
@@ -189,15 +190,17 @@ the files `0600`.
 | `session_id`, `cwd` | Taken from the hook payload |
 | `tool` | Tool name |
 | `decision` | `allow`, `ask`, `deny`, or in audit mode `would-ask` / `would-deny` |
+| `policy` | `ok`; `missing` when the default policy file doesn't exist (every call allowed); `invalid` when the policy can't be used (every call denied) |
 | `rules` | Ids of the matching rules |
-| `input` | `tool_input` as JSON, redacted, then cut to 2000 characters |
+| `input` | `tool_input` as JSON, redacted, then cut to 2000 characters; empty in the record for a call that hit the deadline |
 
 Redaction replaces two kinds of text with `[REDACTED]`. The first is the value of any environment
 variable whose name looks like a credential, such as `*TOKEN*`, `*SECRET*` or `*API_KEY*`. The
 second is any text shaped like a common credential: GitHub, GitLab, npm, Slack, Anthropic and
 OpenAI-style tokens, AWS access key ids, Google API keys, and whole PEM private key blocks.
 Every string in the input, keys included, is redacted before it is serialized, so JSON escaping
-can't hide a secret that contains a quote or a backslash. The `cwd` field is redacted too. It's
+can't hide a secret that contains a quote or a backslash. A number whose digits contain a secret
+value, such as a numeric PIN, becomes a redacted string. The `cwd` field is redacted too. It's
 best-effort. A secret in some other format can still reach the log.
 
 The hook never fails because of logging. If a record can't be written, the decision still stands.
@@ -231,9 +234,13 @@ model.
   indirection can all express the same action with different text. A rule covers exactly what
   its pattern matches; treat the starter rules as guard rails against accidents, not against an
   adversary.
-- **A hook that hangs runs the tool.** Claude Code cancels a hook after its timeout and treats
-  that as a non-blocking error. Keep regexes simple; a nested quantifier such as `(a+)+` can make
-  the hook hang on crafted input.
+- **A slow evaluation is denied, not run.** Claude Code cancels a hook after its timeout and runs
+  the tool, so the hook stops itself first. After 5 seconds a stall such as a blocked read ends
+  in a deny with the reason `evaluation exceeded deadline`. A regex that backtracks, such as
+  `(a+)+` on crafted input, holds Python's interpreter lock, so the hook can't answer; one second
+  later a watchdog ends the process with status 1, which the installed `|| exit 2` turns into a
+  block. A hook command written by hand without `|| exit 2` fails open in that case. Keep regexes
+  simple. `CC_FIREWALL_DEADLINE` (seconds) shortens the deadline for tests; it can't lengthen it.
 - **On Windows the hook command needs Git Bash**, which Claude Code uses to run hooks when it is
   installed. The `'...' || exit 2` form doesn't parse in Windows PowerShell 5.1.
 - **It doesn't see what runs.** A script the agent writes and then executes is checked only as

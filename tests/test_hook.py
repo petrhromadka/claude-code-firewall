@@ -3,6 +3,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +135,64 @@ def test_explicit_missing_policy_denies(home: Path, tmp_path: Path) -> None:
     out = json.loads(result.stdout)["hookSpecificOutput"]
     assert out["permissionDecision"] == "deny"
     assert "does not exist" in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    ("policy_text", "expected"), [("{}", "ok"), (None, "missing"), ("[", "invalid")]
+)
+def test_record_names_policy_state(
+    home: Path, tmp_path: Path, policy_text: str | None, expected: str
+) -> None:
+    args: list[str] = []
+    if policy_text is not None:
+        (tmp_path / "p.json").write_text(policy_text, encoding="utf-8")
+        args = ["--policy", str(tmp_path / "p.json")]
+    empty_home = {"HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}  # no default policy
+    run_cli(home, "hook", *args, stdin=payload("Bash", {"command": "ls"}), extra_env=empty_home)
+    assert records(home)[0]["policy"] == expected
+
+
+def test_deadline_denies_when_stdin_stalls(home: Path) -> None:
+    env = {**os.environ, "PYTHONPATH": SRC, "CC_FIREWALL_HOME": str(home)}
+    env["CC_FIREWALL_DEADLINE"] = "0.5"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "cc_firewall", "hook", "--policy", str(EXAMPLE)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env=env,
+    )
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    proc.stdin.write(b'{"tool_name": "Bash"')  # never closed: the read blocks
+    proc.stdin.flush()
+    try:
+        assert proc.wait(timeout=10) == 0
+        out = json.loads(proc.stdout.read())["hookSpecificOutput"]
+    finally:
+        proc.stdin.close()
+        proc.kill()
+    assert out["permissionDecision"] == "deny"
+    assert "exceeded deadline" in out["permissionDecisionReason"]
+    record = records(home)[0]
+    assert (record["decision"], record["policy"], record["input"]) == ("deny", "ok", "")
+
+
+def test_backtracking_regex_is_stopped_by_watchdog(home: Path, tmp_path: Path) -> None:
+    rule = {"id": "redos", "tools": ["Bash"], "field": "command", "regex": "^(a+)+$"}
+    policy = write_policy(tmp_path, rules=[{**rule, "decision": "deny", "reason": "x"}])
+    start = time.monotonic()
+    result = run_cli(
+        home,
+        "hook",
+        "--policy",
+        str(policy),
+        stdin=payload("Bash", {"command": "a" * 40 + "!"}),
+        extra_env={"CC_FIREWALL_DEADLINE": "0.5"},
+    )
+    # Exit 1 from faulthandler; the installed "|| exit 2" makes Claude Code block the call.
+    assert result.returncode == 1
+    assert "Timeout" in result.stderr
+    assert time.monotonic() - start < 10
 
 
 def test_installed_command_ignores_modules_planted_in_cwd(home: Path, tmp_path: Path) -> None:
