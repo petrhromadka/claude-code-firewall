@@ -1,4 +1,4 @@
-"""Command line interface: hook, check, validate, install and log."""
+"""Command line interface: hook, check, validate, install, uninstall, doctor and log."""
 
 import argparse
 import json
@@ -7,9 +7,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from cc_firewall.audit import read_records
+from cc_firewall.doctor import doctor
 from cc_firewall.engine import evaluate
 from cc_firewall.hook import run_hook
-from cc_firewall.install import default_settings_path, install
+from cc_firewall.install import SHELLS, SelfTestError, default_settings_path, install, uninstall
 from cc_firewall.policy import PolicyError, default_policy_path, load_policy
 
 
@@ -52,11 +53,34 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 def _cmd_install(args: argparse.Namespace) -> int:
     try:
         policy = (args.policy or default_policy_path()).absolute()
-        sys.stdout.write(install(args.settings, policy=policy, dry_run=args.dry_run) + "\n")
-    except ValueError as exc:  # json.JSONDecodeError is a ValueError
+        message = install(
+            args.settings,
+            policy=policy,
+            dry_run=args.dry_run,
+            shell=args.shell,
+            run_self_test=not args.skip_self_test,
+        )
+    except (ValueError, OSError, SelfTestError) as exc:  # JSONDecodeError is a ValueError
         sys.stderr.write(f"error: {exc}\n")
         return 2
+    sys.stdout.write(message + "\n")
     return 0
+
+
+def _cmd_uninstall(args: argparse.Namespace) -> int:
+    try:
+        message = uninstall(args.settings, dry_run=args.dry_run)
+    except (ValueError, OSError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    sys.stdout.write(message + "\n")
+    return 0
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    report, code = doctor(args.settings, args.policy)
+    sys.stdout.write(report + "\n")
+    return code
 
 
 def _cmd_log(args: argparse.Namespace) -> int:
@@ -99,7 +123,30 @@ def _build_parser() -> argparse.ArgumentParser:
     inst.add_argument(
         "--dry-run", action="store_true", help="print the new PreToolUse section, write nothing"
     )
+    inst.add_argument(
+        "--shell",
+        choices=SHELLS,
+        default="bash",
+        help="shell Claude Code runs the hook in (default bash: Git Bash on Windows)",
+    )
+    inst.add_argument(
+        "--skip-self-test", action="store_true", help="write the hook without running it first"
+    )
     inst.set_defaults(func=_cmd_install)
+
+    uninst = sub.add_parser("uninstall", help="remove the hook from Claude Code settings")
+    uninst.add_argument("--settings", type=Path, default=default_settings_path())
+    uninst.add_argument(
+        "--dry-run", action="store_true", help="print the new PreToolUse section, write nothing"
+    )
+    uninst.set_defaults(func=_cmd_uninstall)
+
+    doc = sub.add_parser("doctor", help="check the installed hook, policy and audit log")
+    doc.add_argument("--settings", type=Path, default=default_settings_path())
+    doc.add_argument(
+        "--policy", type=Path, help="policy file to check (default: the one the hook uses)"
+    )
+    doc.set_defaults(func=_cmd_doctor)
 
     log = sub.add_parser("log", help="print audit records")
     log.add_argument("--tail", type=int, default=20)
