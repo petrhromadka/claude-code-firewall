@@ -11,7 +11,14 @@ from cc_firewall.audit import read_records
 from cc_firewall.doctor import doctor
 from cc_firewall.engine import evaluate
 from cc_firewall.hook import main as hook_main
-from cc_firewall.install import SHELLS, SelfTestError, default_settings_path, install, uninstall
+from cc_firewall.install import (
+    SHELLS,
+    SelfTestError,
+    default_settings_path,
+    install,
+    policy_warnings,
+    uninstall,
+)
 from cc_firewall.policy import (
     PolicyError,
     default_policy_path,
@@ -72,8 +79,8 @@ def _cmd_test(args: argparse.Namespace) -> int:
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
+    policy = (args.policy or default_policy_path()).absolute()
     try:
-        policy = (args.policy or default_policy_path()).absolute()
         message = install(
             args.settings,
             policy=policy,
@@ -85,6 +92,9 @@ def _cmd_install(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: {exc}\n")
         return 2
     sys.stdout.write(message + "\n")
+    if not args.dry_run:
+        for warning in policy_warnings(policy):
+            sys.stderr.write(f"warning: {warning}\n")
     return 0
 
 

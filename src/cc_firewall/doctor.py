@@ -1,5 +1,6 @@
 """Check that the installed hook, its interpreter, the policy and the audit log all work."""
 
+import shutil
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,9 +15,9 @@ from cc_firewall.install import (
     our_handlers,
 )
 from cc_firewall.install import self_test as run_self_test
-from cc_firewall.policy import PolicyError, default_policy_path, load_policy
+from cc_firewall.policy import PolicyError, default_policy_path, load_policy, slow_regex_warnings
 
-Check = tuple[str, str, str]  # (status, name, detail); status is OK or FAIL
+Check = tuple[str, str, str]  # (status, name, detail); status is OK, FAIL, WARN or NOTE
 
 
 def _is_current(handler: dict[str, object], policy: Path) -> bool:
@@ -45,23 +46,39 @@ def _hook_checks(settings_path: Path, policy: Path | None) -> Iterator[Check]:
         yield "FAIL", "hook", f"no cc-firewall hook in {settings_path}; run cc-firewall install"
         return
     argv = hook_argv(handlers[0])
-    policy = policy or _installed_policy(argv) or default_policy_path()
-    if not all(_is_current(h, policy) for h in handlers):
+    installed = (_installed_policy(argv) or default_policy_path()).absolute()
+    stored_shell = handlers[0].get("shell")
+    shell = stored_shell if stored_shell in SHELLS else "bash"
+    if not all(_is_current(h, installed) for h in handlers):
         yield "FAIL", "hook", "entry is stale; run cc-firewall install to refresh it"
     else:
-        yield "OK", "hook", f"current, shell {handlers[0]['shell']}"
-    interpreter = Path(argv[0]) if argv else None
-    if interpreter is not None and interpreter.is_file():
-        yield "OK", "interpreter", str(interpreter)
-    else:
-        yield "FAIL", "interpreter", f"{interpreter} does not exist"
+        yield "OK", "hook", f"current, shell {shell}"
+    yield _interpreter_check(argv)
+    yield _self_test_check(hook_entry(installed, str(shell)))
+    if policy is not None and policy.absolute() != installed:
+        yield "NOTE", "policy", f"checking {policy}, but the installed hook reads {installed}"
+    yield from _policy_check(policy or installed)
+
+
+def _interpreter_check(argv: list[str]) -> Check:
+    found = argv[0] if argv and Path(argv[0]).is_file() else None
+    found = found or (shutil.which(argv[0]) if argv else None)
+    if found is None:
+        return "FAIL", "interpreter", f"{argv[0] if argv else '(none)'} does not exist"
+    return "OK", "interpreter", found
+
+
+def _self_test_check(handler: dict[str, object]) -> Check:
+    """Run the hook command rebuilt for this interpreter, never the one stored in settings.
+
+    The stored command may come from a copied or cloned settings file; running it would run
+    whatever it names.
+    """
     try:
-        run_self_test(handlers[0])
+        run_self_test(handler)
     except SelfTestError as exc:
-        yield "FAIL", "self-test", str(exc)
-    else:
-        yield "OK", "self-test", "hook command ran and exited 0"
-    yield from _policy_check(policy)
+        return "FAIL", "self-test", str(exc)
+    return "OK", "self-test", "hook command ran and exited 0"
 
 
 def _policy_check(policy: Path) -> Iterator[Check]:
@@ -69,8 +86,10 @@ def _policy_check(policy: Path) -> Iterator[Check]:
         loaded = load_policy(policy, required=True)
     except PolicyError as exc:
         yield "FAIL", "policy", "; ".join(exc.errors)
-    else:
-        yield "OK", "policy", f"{policy}: {len(loaded.rules)} rules, mode {loaded.mode}"
+        return
+    yield "OK", "policy", f"{policy}: {len(loaded.rules)} rules, mode {loaded.mode}"
+    for warning in slow_regex_warnings(loaded):
+        yield "WARN", "policy", warning
 
 
 def _audit_check() -> Check:
@@ -88,7 +107,9 @@ def run_checks(settings_path: Path, policy: Path | None = None) -> list[Check]:
     """Run every check and return the results in order.
 
     ``policy`` defaults to the path the installed hook uses, else the default policy path.
-    Without a hook entry the policy is still checked, at ``policy`` or the default path.
+    It only selects the file for the policy check; whether the hook is stale is judged
+    against the path the hook reads. Without a hook entry the policy is still checked, at
+    ``policy`` or the default path.
     """
     checks = list(_hook_checks(settings_path, policy))
     if not any(name == "policy" for _, name, _ in checks):
@@ -100,7 +121,8 @@ def run_checks(settings_path: Path, policy: Path | None = None) -> list[Check]:
 def doctor(settings_path: Path, policy: Path | None = None) -> tuple[str, int]:
     """Return the checklist text and exit code: 1 if any check failed, else 0.
 
-    Each check is one ``OK`` or ``FAIL`` line; a multi-line detail continues indented.
+    Each check is one ``OK``, ``FAIL``, ``WARN`` or ``NOTE`` line; a multi-line detail
+    continues indented. Only ``FAIL`` lines set the exit code.
     """
     checks = run_checks(settings_path, policy)
     lines = [
