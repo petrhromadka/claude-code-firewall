@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-HOOK_SUFFIX = "-m cc_firewall hook"
+HOOK_MARKER = "-m cc_firewall hook"
 
 
 def default_settings_path() -> Path:
@@ -15,21 +15,30 @@ def default_settings_path() -> Path:
 
 
 def hook_command() -> str:
-    """Return the command line the settings entry runs."""
-    return f'"{sys.executable}" {HOOK_SUFFIX}'
+    """Return the command line the settings entry runs.
+
+    Claude Code treats a hook that exits with any code other than 0 or 2 as a non-blocking
+    error and runs the tool anyway. ``|| exit 2`` turns a missing interpreter or an
+    uninstalled package into a block instead of a silent bypass.
+    """
+    return f'"{sys.executable}" {HOOK_MARKER} || exit 2'
 
 
-def _is_ours(entry: object) -> bool:
-    hooks = entry.get("hooks") if isinstance(entry, dict) else None
-    if not isinstance(hooks, list):
-        return False
-    return any(
-        isinstance(h, dict) and str(h.get("command", "")).endswith(HOOK_SUFFIX) for h in hooks
-    )
+def _our_hooks(entries: list[Any]) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for entry in entries:
+        hooks = entry.get("hooks") if isinstance(entry, dict) else None
+        if isinstance(hooks, list):
+            found += [
+                h for h in hooks if isinstance(h, dict) and HOOK_MARKER in str(h.get("command"))
+            ]
+    return found
 
 
 def add_hook(settings: dict[str, Any]) -> bool:
-    """Add the hook entry in place. Return False if it was already present.
+    """Add or refresh the hook entry in place. Return False if it was already current.
+
+    An existing entry with a stale interpreter path is rewritten to the current one.
 
     Raises:
         ValueError: ``hooks`` or ``hooks.PreToolUse`` exists with an unexpected type.
@@ -40,8 +49,12 @@ def add_hook(settings: dict[str, Any]) -> bool:
     entries = hooks.setdefault("PreToolUse", [])
     if not isinstance(entries, list):
         raise ValueError("'hooks.PreToolUse' in settings must be a list")
-    if any(_is_ours(e) for e in entries):
-        return False
+    ours = _our_hooks(entries)
+    if ours:
+        stale = [h for h in ours if h.get("command") != hook_command()]
+        for hook in stale:
+            hook["command"] = hook_command()
+        return bool(stale)
     entries.append({"matcher": "*", "hooks": [{"type": "command", "command": hook_command()}]})
     return True
 

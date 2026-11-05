@@ -92,7 +92,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     log = sub.add_parser("log", help="print audit records")
     log.add_argument("--tail", type=int, default=20)
-    log.add_argument("--decision", choices=("deny", "ask", "allow"))
+    log.add_argument("--decision", choices=("deny", "ask", "allow", "would-deny", "would-ask"))
     log.set_defaults(func=_cmd_log)
     return parser
 

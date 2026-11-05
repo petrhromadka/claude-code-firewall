@@ -42,7 +42,7 @@ def load_policy(path: Path | None = None) -> Policy:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return Policy()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise PolicyError([f"cannot read {path}: {exc}"]) from exc
     try:
         data = json.loads(text)
@@ -105,7 +105,7 @@ def _parse_rule(raw: object, where: str, errors: list[str]) -> Rule | None:
     tools = _tools(raw, where, errors)
     glob = _text(raw, "glob", where, errors, required=False)
     regex = _regex(raw, "regex", where, errors)
-    if (glob is None) == (regex is None):
+    if (raw.get("glob") is None) == (raw.get("regex") is None):
         errors.append(f"{where}: set exactly one of 'glob' or 'regex'")
     unless_glob = _text(raw, "unless_glob", where, errors, required=False)
     unless_regex = _regex(raw, "unless_regex", where, errors)

@@ -3,27 +3,61 @@
   "log_allowed": true,
   "rules": [
     {
-      "id": "no-env-read",
-      "tools": ["Read", "Edit"],
+      "id": "no-env-file",
+      "tools": [
+        "Read",
+        "Edit",
+        "MultiEdit",
+        "Write",
+        "NotebookEdit"
+      ],
       "field": "file_path",
-      "regex": "(^|[\\\\/])\\.env(\\.[^\\\\/]+)?$",
+      "glob": "**/.env*",
       "unless_glob": "**/.env.example",
       "decision": "deny",
       "reason": "Reading or editing .env files is disabled."
     },
     {
-      "id": "confirm-push",
-      "tools": ["Bash"],
+      "id": "no-env-search",
+      "tools": [
+        "Grep",
+        "Glob"
+      ],
+      "field": "*",
+      "glob": "**/.env*",
+      "unless_glob": "**/.env.example",
+      "decision": "deny",
+      "reason": "Searching .env files is disabled."
+    },
+    {
+      "id": "confirm-env-shell",
+      "tools": [
+        "Bash",
+        "PowerShell"
+      ],
       "field": "command",
-      "regex": "^\\s*git push\\b",
+      "regex": "(?i)\\.env\\b(?!\\.example)",
+      "decision": "ask",
+      "reason": "This shell command mentions a .env file."
+    },
+    {
+      "id": "confirm-push",
+      "tools": [
+        "Bash",
+        "PowerShell"
+      ],
+      "field": "command",
+      "regex": "(?i)\\bgit\\b[^;&|\\n]*\\bpush\\b",
       "decision": "ask",
       "reason": "Confirm git push."
     },
     {
       "id": "confirm-rm-rf",
-      "tools": ["Bash"],
+      "tools": [
+        "Bash"
+      ],
       "field": "command",
-      "regex": "\\brm\\s+-[a-zA-Z]*([rR][a-zA-Z]*f|f[a-zA-Z]*[rR])",
+      "regex": "\\brm\\b(?=[^;&|\\n]*\\s-[a-zA-Z]*[rR])(?=[^;&|\\n]*\\s-[a-zA-Z]*f)",
       "decision": "ask",
       "reason": "Confirm recursive forced delete."
     }

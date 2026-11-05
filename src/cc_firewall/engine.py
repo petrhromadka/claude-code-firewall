@@ -7,14 +7,26 @@ from typing import Any
 
 from cc_firewall.models import Policy, Rule, Verdict
 
+_STREAM = re.compile(r"(?<=[^/:]):[^/]*$")
+
+
+def normalize_path(value: str) -> str:
+    """Normalize a path the way Windows resolves it, so aliases of one file compare equal.
+
+    Lowercases, uses ``/`` as the separator, drops an NTFS stream suffix (``.env::$DATA``)
+    and strips trailing dots and spaces from each component (``.env.`` opens ``.env``).
+    """
+    value = _STREAM.sub("", value.replace("\\", "/").lower())
+    return "/".join(part.rstrip(". ") or part for part in value.split("/"))
+
 
 def glob_match(pattern: str, value: str) -> bool:
-    """Match value against an fnmatch pattern, ignoring case and path separator style.
+    """Match value against an fnmatch pattern after normalizing both as paths.
 
     ``**/`` also matches zero directories, so ``**/.env`` matches a bare ``.env``.
     """
     pattern = pattern.replace("\\", "/").lower()
-    value = value.replace("\\", "/").lower()
+    value = normalize_path(value)
     return any(fnmatchcase(value, p) for p in {pattern, pattern.replace("**/", "")})
 
 

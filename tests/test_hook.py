@@ -65,11 +65,11 @@ def test_hook_denies_with_example_policy_and_logs(home: Path) -> None:
     out = json.loads(result.stdout)["hookSpecificOutput"]
     assert out["hookEventName"] == "PreToolUse"
     assert out["permissionDecision"] == "deny"
-    assert "no-env-read" in out["permissionDecisionReason"]
+    assert "no-env-file" in out["permissionDecisionReason"]
     record = records(home)[0]
     assert (record["decision"], record["rules"], record["tool"]) == (
         "deny",
-        ["no-env-read"],
+        ["no-env-file"],
         "Read",
     )
 
@@ -172,11 +172,11 @@ def test_check_and_validate(home: Path) -> None:
         str(EXAMPLE),
     )
     assert denied.returncode == 1
-    assert "no-env-read" in denied.stdout
+    assert "no-env-file" in denied.stdout
     allowed = run_cli(
         home, "check", "--tool", "Bash", "--input", '{"command": "ls"}', "--policy", str(EXAMPLE)
     )
     assert allowed.returncode == 0
     valid = run_cli(home, "validate", "--policy", str(EXAMPLE))
     assert valid.returncode == 0
-    assert "3 rules" in valid.stdout
+    assert "5 rules" in valid.stdout
