@@ -63,7 +63,6 @@ allowed.
 Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Works on Linux, macOS and
 Windows, with no runtime dependencies beyond the standard library.
 
-<!-- regen: validate and test counts below come from the starter policy with no-env-notebook -->
 ```sh
 uv tool install git+https://github.com/petrhromadka/claude-code-firewall@v0.2.0
 curl -fsSL --create-dirs -o ~/.claude/cc-firewall.json \
@@ -89,7 +88,6 @@ then switch to `"enforce"`. On Windows without Git Bash, see [Windows](#windows)
 
 `install` adds one `PreToolUse` entry with matcher `*` to `~/.claude/settings.json`:
 
-<!-- regen: command string from `cc-firewall install --dry-run` once the watchdog.log message lands -->
 ```json
 {
   "type": "command",
@@ -124,7 +122,6 @@ symbolic link is replaced, not followed. Running `install` again changes nothing
 interpreter. A refresh keeps the existing entry's shell unless you pass `--shell`, and says when
 the shell changed:
 
-<!-- regen: refresh message from the parallel install change -->
 ```console
 $ cc-firewall install --shell bash
 refreshed in /home/me/.claude/settings.json (shell powershell -> bash)
@@ -136,7 +133,6 @@ same atomic write and `.bak` copy; `uninstall --dry-run` prints exactly what it 
 
 After installing, `doctor` should show every line `OK`:
 
-<!-- regen: doctor output with the 6-rule starter policy -->
 ```console
 $ cc-firewall doctor
 OK   settings: /home/me/.claude/settings.json is valid JSON
@@ -162,7 +158,6 @@ works there; the self-test finds Git Bash next to `git` or through `CLAUDE_CODE_
 Without Git Bash, install with `--shell powershell`. That writes a command that parses in Windows
 PowerShell 5.1 and PowerShell 7 and turns any non-zero exit into `exit 2`:
 
-<!-- regen: PowerShell command from `cc-firewall install --shell powershell --dry-run` -->
 ```json
 {
   "type": "command",
@@ -216,12 +211,14 @@ When no rule in the policy lists the tool, `check` adds a note and suggests a cl
 which catches a typo such as `bash` for `Bash`. When `--input` is not valid JSON, the error comes
 with a hint, such as writing a Windows backslash as `\\` or using forward slashes:
 
-<!-- regen: check note and --input hint from the parallel CLI change -->
 ```console
 $ cc-firewall check --tool bash --input '{"command": "git push"}'
+note: no rule applies to tool 'bash'; tool names are case-sensitive (did you mean 'Bash'?)
 decision: allow
 mode: enforce
-note: no rule applies to tool 'bash'; tool names are case-sensitive (did you mean 'Bash'?)
+
+$ cc-firewall check --tool Read --input '{"file_path": "C:\Users\me"}'
+error: --input is not valid JSON: Invalid \escape: line 1 column 18 (char 17). Write a backslash as \\ or use forward slashes
 ```
 
 ## Commands
@@ -256,7 +253,6 @@ Exit codes:
 Errors are printed on stderr with an `error:` prefix, and a usage error exits `2`. `validate`
 without a policy file tells you where to put one:
 
-<!-- regen: validate message from the parallel CLI change -->
 ```console
 $ cc-firewall validate
 error: no policy at /home/me/.claude/cc-firewall.json; copy examples/policy.json there (see README Quick start)
@@ -328,7 +324,7 @@ How the decision is made:
 - Unknown keys, `null` for any key, a bad regex, or a rule with both or neither of `glob` and
   `regex` make the policy invalid, and an invalid policy denies every call (see
   [Fail closed](#fail-closed)). An unknown key gets a suggestion, such as
-  `(did you mean 'unless_glob'?)`. <!-- regen: exact unknown-key error wording -->
+  `(did you mean 'unless_glob'?)`.
 - `validate` warns about a regex with a nested quantifier, such as `(a+)+`, which can backtrack
   for a long time on crafted input. It is a heuristic and doesn't fail validation:
 
@@ -446,7 +442,6 @@ The hook never fails because of logging. If a record can't be written, the decis
 `log` and `stats` read the log and its rotated files, skip malformed lines, and escape control
 and format characters, so a crafted input can't rewrite your terminal. `log --rule ID` shows the
 records of one rule; with nothing to show, `log` prints `no audit records in <path>`.
-<!-- regen: empty-log message from the parallel CLI change -->
 
 ```console
 $ cc-firewall stats --since 2026-11-05
