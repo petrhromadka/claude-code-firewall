@@ -20,16 +20,19 @@ def normalize_path(value: str) -> str:
     return "/".join(part.rstrip(". ") or part for part in value.split("/"))
 
 
-def glob_match(pattern: str, value: str) -> bool:
+def glob_match(pattern: str, value: str, *, bare_dir: bool = True) -> bool:
     """Match value against an fnmatch pattern after normalizing both as paths.
 
-    ``**/`` also matches zero directories, so ``**/.env`` matches a bare ``.env``, and a
-    trailing ``/**`` matches zero components, so ``/app/**`` matches ``/app`` itself.
+    ``**/`` also matches zero directories, so ``**/.env`` matches a bare ``.env``. With
+    ``bare_dir`` a trailing ``/**`` also matches zero components, so ``/app/**`` matches
+    ``/app`` itself. Exceptions (``unless_glob``) pass ``bare_dir=False`` so that widening a
+    pattern can only make a rule match more, never exempt more.
     """
     pattern = pattern.replace("\\", "/").lower()
     value = normalize_path(value)
     variants = {pattern, pattern.replace("**/", "")}
-    variants |= {p.removesuffix("/**") for p in variants if p.endswith("/**")}
+    if bare_dir:
+        variants |= {p.removesuffix("/**") for p in variants if p.endswith("/**")}
     return any(fnmatchcase(value, p) for p in variants)
 
 
@@ -54,8 +57,10 @@ def _values(rule: Rule, tool_input: dict[str, Any]) -> Iterator[str]:
         yield value
 
 
-def _hit(glob: str | None, regex: re.Pattern[str] | None, value: str) -> bool:
-    if glob is not None and glob_match(glob, value):
+def _hit(
+    glob: str | None, regex: re.Pattern[str] | None, value: str, *, bare_dir: bool = True
+) -> bool:
+    if glob is not None and glob_match(glob, value, bare_dir=bare_dir):
         return True
     return regex is not None and regex.search(value) is not None
 
@@ -63,7 +68,7 @@ def _hit(glob: str | None, regex: re.Pattern[str] | None, value: str) -> bool:
 def _value_matches(rule: Rule, value: str) -> bool:
     if not _hit(rule.glob, rule.regex, value):
         return False
-    return not _hit(rule.unless_glob, rule.unless_regex, value)
+    return not _hit(rule.unless_glob, rule.unless_regex, value, bare_dir=False)
 
 
 def rule_matches(rule: Rule, tool: str, tool_input: dict[str, Any], cwd: str | None = None) -> bool:

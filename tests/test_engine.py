@@ -233,3 +233,23 @@ def test_validator_rejects_the_values_the_schema_rejects(kind: str, key: str) ->
             parse_policy({wrap: [{**base, key: value}]})
     if prop.get("type") == "string":
         parse_policy({wrap: [{**base, key: "r.*"}]})
+
+
+def test_unless_glob_trailing_globstar_does_not_exempt_bare_dir() -> None:
+    policy = parse_policy(
+        {
+            "rules": [
+                {
+                    "id": "r",
+                    "tools": ["Read"],
+                    "field": "file_path",
+                    "glob": "/srv/**",
+                    "unless_glob": "/srv/public/**",
+                    "decision": "deny",
+                    "reason": "x",
+                }
+            ]
+        }
+    )
+    assert evaluate(policy, "Read", {"file_path": "/srv/public"}).decision == "deny"
+    assert evaluate(policy, "Read", {"file_path": "/srv/public/a.txt"}).decision == "allow"
