@@ -62,16 +62,26 @@ def _value_matches(rule: Rule, value: str) -> bool:
     return not _hit(rule.unless_glob, rule.unless_regex, value)
 
 
-def rule_matches(rule: Rule, tool: str, tool_input: dict[str, Any]) -> bool:
-    """Return True if the rule applies to this tool call."""
+def rule_matches(rule: Rule, tool: str, tool_input: dict[str, Any], cwd: str | None = None) -> bool:
+    """Return True if the rule applies to this tool call.
+
+    A rule with ``cwd_glob`` applies only when ``cwd`` is given and matches it.
+    """
     if not any(fnmatchcase(tool, pattern) for pattern in rule.tools):
+        return False
+    if rule.cwd_glob is not None and (cwd is None or not glob_match(rule.cwd_glob, cwd)):
         return False
     return any(_value_matches(rule, v) for v in _values(rule, tool_input))
 
 
-def evaluate(policy: Policy, tool: str, tool_input: dict[str, Any]) -> Verdict:
-    """Evaluate all rules; deny beats ask, and the reason names every matched rule."""
-    matched = [r for r in policy.rules if rule_matches(r, tool, tool_input)]
+def evaluate(
+    policy: Policy, tool: str, tool_input: dict[str, Any], *, cwd: str | None = None
+) -> Verdict:
+    """Evaluate all rules; deny beats ask, and the reason names every matched rule.
+
+    ``cwd`` is the session's working directory; without it, rules with ``cwd_glob`` never match.
+    """
+    matched = [r for r in policy.rules if rule_matches(r, tool, tool_input, cwd)]
     if not matched:
         return Verdict()
     decision = "deny" if any(r.decision == "deny" for r in matched) else "ask"

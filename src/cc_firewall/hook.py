@@ -58,7 +58,7 @@ def run_hook(stdin: IO[bytes], policy_path: Path | None = None) -> str | None:
     try:
         hook = parse_hook_input(stdin.read().decode("utf-8"))
         policy = load_policy(policy_path, required=policy_path is not None)
-        verdict = evaluate(policy, hook.tool, hook.tool_input)
+        verdict = evaluate(policy, hook.tool, hook.tool_input, cwd=hook.cwd or None)
     except PolicyError as exc:
         return _fail_closed(hook, f"unusable policy, denying all tool calls: {exc}")
     except Exception as exc:  # fail closed on anything unexpected

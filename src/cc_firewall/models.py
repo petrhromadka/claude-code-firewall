@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 DECISIONS = ("deny", "ask")
+VERDICTS = ("allow", "ask", "deny")
 MODES = ("enforce", "audit")
 
 
@@ -25,6 +26,8 @@ class Rule:
         regex: Pattern searched anywhere in the value.
         unless_glob: Exception glob; a value matching it is skipped.
         unless_regex: Exception regex; a value matching it is skipped.
+        cwd_glob: If set, the rule applies only when the session's working directory matches
+            this glob (same normalization as ``glob``).
     """
 
     id: str
@@ -36,6 +39,17 @@ class Rule:
     regex: re.Pattern[str] | None = None
     unless_glob: str | None = None
     unless_regex: re.Pattern[str] | None = None
+    cwd_glob: str | None = None
+
+
+@dataclass(frozen=True)
+class PolicyTest:
+    """One policy test case: a tool call and the decision the policy must give it."""
+
+    tool: str
+    tool_input: dict[str, Any]
+    expect: str
+    cwd: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,11 +60,13 @@ class Policy:
         mode: ``"enforce"`` emits decisions; ``"audit"`` only logs what would happen.
         log_allowed: Also write allowed calls to the audit log.
         rules: Rules in file order.
+        tests: Test cases run by ``cc-firewall test``; never used by the hook.
     """
 
     mode: str = "enforce"
     log_allowed: bool = True
     rules: tuple[Rule, ...] = field(default=())
+    tests: tuple[PolicyTest, ...] = field(default=())
 
 
 @dataclass(frozen=True)

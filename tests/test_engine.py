@@ -1,9 +1,25 @@
+import io
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from cc_firewall.engine import evaluate
-from cc_firewall.policy import PolicyError, parse_policy
+from cc_firewall.hook import run_hook
+from cc_firewall.policy import (
+    POLICY_KEYS,
+    RULE_KEYS,
+    TEST_KEYS,
+    PolicyError,
+    load_policy,
+    parse_policy,
+    slow_regex_warnings,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+EXAMPLE = ROOT / "examples" / "policy.json"
+SCHEMA = ROOT / "schema" / "policy.schema.json"
 
 
 def make_policy(*rules: dict[str, Any], **top: Any):
@@ -83,8 +99,74 @@ def test_deny_beats_ask_and_reason_lists_every_rule() -> None:
         {"rules": [rule("a", decision="allow")]},
         {"rules": [rule("a"), rule("a")]},
         {"rules": [rule("a", typo=1)]},
+        {"rules": [rule("a", cwd_glob="")]},
+        {"$schema": 1},
+        {"tests": {}},
+        {"tests": [{"tool": "Bash", "input": {}, "expect": "maybe"}]},
+        {"tests": [{"tool": "Bash", "input": "x", "expect": "allow"}]},
+        {"tests": [{"tool": "Bash", "input": {}, "expect": "allow", "name": "typo"}]},
     ],
 )
 def test_invalid_policy_raises(data: object) -> None:
     with pytest.raises(PolicyError):
         parse_policy(data)
+
+
+@pytest.mark.parametrize(
+    ("cwd", "expected"),
+    [
+        ("/home/me/work/app", "deny"),
+        ("C:\\Home\\Me\\Work\\App", "deny"),
+        ("/home/me/other", "allow"),
+        (None, "allow"),
+    ],
+)
+def test_cwd_glob_limits_rule_to_matching_directories(cwd: str | None, expected: str) -> None:
+    policy = make_policy(rule("r", cwd_glob="**/work/**"))
+    assert evaluate(policy, "Bash", {"command": "x"}, cwd=cwd).decision == expected
+
+
+def test_hook_passes_payload_cwd_to_rules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CC_FIREWALL_HOME", str(tmp_path / "home"))
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps({"rules": [rule("r", cwd_glob="/work")]}), encoding="utf-8")
+
+    def decide(cwd: str) -> str | None:
+        data = {"tool_name": "Bash", "tool_input": {"command": "x"}, "cwd": cwd}
+        return run_hook(io.BytesIO(json.dumps(data).encode()), path)
+
+    assert '"deny"' in (decide("/work") or "")
+    assert decide("/elsewhere") is None
+
+
+@pytest.mark.parametrize(
+    ("pattern", "slow"),
+    [
+        ("(a+)+", True),
+        ("(a*)*", True),
+        ("(.*)*", True),
+        ("(?:\\w+\\s?)+$", True),
+        ("(x{2,})+", True),
+        ("(a\\+)+", False),
+        ("(ab)+", False),
+        ("^git push\\b", False),
+    ],
+)
+def test_slow_regex_warning(pattern: str, slow: bool) -> None:
+    policy = make_policy(rule("ok"), rule("r", regex=pattern))
+    expected = ["rules[1] (r): regex may be slow on some inputs"] if slow else []
+    assert slow_regex_warnings(policy) == expected
+
+
+def test_example_policy_has_no_slow_regex_warnings() -> None:
+    assert slow_regex_warnings(load_policy(EXAMPLE, required=True)) == []
+
+
+def test_schema_lists_exactly_the_keys_the_validator_accepts() -> None:
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    defs = schema["$defs"]
+    assert set(schema["properties"]) == POLICY_KEYS
+    assert set(defs["rule"]["properties"]) == RULE_KEYS
+    assert set(defs["test"]["properties"]) == TEST_KEYS
+    for node in (schema, defs["rule"], defs["test"]):
+        assert node["additionalProperties"] is False
