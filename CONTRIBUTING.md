@@ -24,9 +24,16 @@ uv run ty check src
 uv run pytest -n auto
 ```
 
-The hooks in [.pre-commit-config.yaml](.pre-commit-config.yaml) run trailing-whitespace,
-end-of-file and ruff fixes, plus [gitleaks](https://github.com/gitleaks/gitleaks). Run them with
-[prek](https://github.com/j178/prek) or `pre-commit`.
+The hooks in [.pre-commit-config.yaml](.pre-commit-config.yaml) are:
+
+- `trailing-whitespace` and `end-of-file-fixer` from
+  [pre-commit-hooks](https://github.com/pre-commit/pre-commit-hooks)
+- `ruff-check --fix` and `ruff-format` from [ruff](https://github.com/astral-sh/ruff-pre-commit)
+- [gitleaks](https://github.com/gitleaks/gitleaks), which looks for committed secrets
+- [actionlint](https://github.com/rhysd/actionlint), which checks the GitHub Actions workflows
+- [zizmor](https://github.com/zizmorcore/zizmor), which audits the workflows for security issues
+
+Run them with [prek](https://github.com/j178/prek) (`prek run --all-files`) or `pre-commit`.
 
 ## Pull requests
 
@@ -34,6 +41,11 @@ end-of-file and ruff fixes, plus [gitleaks](https://github.com/gitleaks/gitleaks
   starts with a test that reproduces the bug.
 - The hook must fail closed. An error during evaluation, or an invalid policy, must deny the
   call, never allow it.
+- A new policy key goes into `policy.py` and
+  [schema/policy.schema.json](schema/policy.schema.json) together; a test fails when they
+  differ.
+- A change to [examples/policy.json](examples/policy.json) comes with entries in its `tests`
+  list. Check it with `uv run cc-firewall test --policy examples/policy.json`.
 - Never put real tokens or credentials in tests or fixtures. Build credential-shaped strings
   at runtime if a test needs one.
 - Add a line to the unreleased section at the top of [CHANGELOG.md](CHANGELOG.md) for any

@@ -20,21 +20,28 @@ def normalize_path(value: str) -> str:
     return "/".join(part.rstrip(". ") or part for part in value.split("/"))
 
 
-def glob_match(pattern: str, value: str) -> bool:
+def glob_match(pattern: str, value: str, *, bare_dir: bool = True) -> bool:
     """Match value against an fnmatch pattern after normalizing both as paths.
 
-    ``**/`` also matches zero directories, so ``**/.env`` matches a bare ``.env``.
+    ``**/`` also matches zero directories, so ``**/.env`` matches a bare ``.env``. With
+    ``bare_dir`` a trailing ``/**`` also matches zero components, so ``/app/**`` matches
+    ``/app`` itself. Exceptions (``unless_glob``) pass ``bare_dir=False`` so that widening a
+    pattern can only make a rule match more, never exempt more.
     """
     pattern = pattern.replace("\\", "/").lower()
     value = normalize_path(value)
-    return any(fnmatchcase(value, p) for p in {pattern, pattern.replace("**/", "")})
+    variants = {pattern, pattern.replace("**/", "")}
+    if bare_dir:
+        variants |= {p.removesuffix("/**") for p in variants if p.endswith("/**")}
+    return any(fnmatchcase(value, p) for p in variants)
 
 
 def _walk_strings(node: object) -> Iterator[str]:
     if isinstance(node, str):
         yield node
     elif isinstance(node, dict):
-        for child in node.values():
+        for key, child in node.items():
+            yield str(key)
             yield from _walk_strings(child)
     elif isinstance(node, list):
         for child in node:
@@ -50,8 +57,10 @@ def _values(rule: Rule, tool_input: dict[str, Any]) -> Iterator[str]:
         yield value
 
 
-def _hit(glob: str | None, regex: re.Pattern[str] | None, value: str) -> bool:
-    if glob is not None and glob_match(glob, value):
+def _hit(
+    glob: str | None, regex: re.Pattern[str] | None, value: str, *, bare_dir: bool = True
+) -> bool:
+    if glob is not None and glob_match(glob, value, bare_dir=bare_dir):
         return True
     return regex is not None and regex.search(value) is not None
 
@@ -59,19 +68,29 @@ def _hit(glob: str | None, regex: re.Pattern[str] | None, value: str) -> bool:
 def _value_matches(rule: Rule, value: str) -> bool:
     if not _hit(rule.glob, rule.regex, value):
         return False
-    return not _hit(rule.unless_glob, rule.unless_regex, value)
+    return not _hit(rule.unless_glob, rule.unless_regex, value, bare_dir=False)
 
 
-def rule_matches(rule: Rule, tool: str, tool_input: dict[str, Any]) -> bool:
-    """Return True if the rule applies to this tool call."""
+def rule_matches(rule: Rule, tool: str, tool_input: dict[str, Any], cwd: str | None = None) -> bool:
+    """Return True if the rule applies to this tool call.
+
+    A rule with ``cwd_glob`` applies only when ``cwd`` is given and matches it.
+    """
     if not any(fnmatchcase(tool, pattern) for pattern in rule.tools):
+        return False
+    if rule.cwd_glob is not None and (cwd is None or not glob_match(rule.cwd_glob, cwd)):
         return False
     return any(_value_matches(rule, v) for v in _values(rule, tool_input))
 
 
-def evaluate(policy: Policy, tool: str, tool_input: dict[str, Any]) -> Verdict:
-    """Evaluate all rules; deny beats ask, and the reason names every matched rule."""
-    matched = [r for r in policy.rules if rule_matches(r, tool, tool_input)]
+def evaluate(
+    policy: Policy, tool: str, tool_input: dict[str, Any], *, cwd: str | None = None
+) -> Verdict:
+    """Evaluate all rules; deny beats ask, and the reason names every matched rule.
+
+    ``cwd`` is the session's working directory; without it, rules with ``cwd_glob`` never match.
+    """
+    matched = [r for r in policy.rules if rule_matches(r, tool, tool_input, cwd)]
     if not matched:
         return Verdict()
     decision = "deny" if any(r.decision == "deny" for r in matched) else "ask"
