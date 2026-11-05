@@ -172,7 +172,10 @@ def test_powershell_quoting_doubles_every_single_quote_char(
     argv = hook_argv(entry)
     assert argv[argv.index("--policy") + 1] == str(policy)
     assert is_ours(entry)
-    if HAS_POWERSHELL:  # the real parse: a broken quote exits 1 or runs the injected text
+    # The real parse: a broken quote exits 1 or runs the injected text. Windows only: the
+    # PowerShell form targets Windows, and pwsh on Linux CI aborts (SIGABRT) on some
+    # non-ASCII paths under parallel test runs.
+    if HAS_POWERSHELL and sys.platform == "win32":
         self_test(entry)
 
 
