@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import IO, NoReturn
 
-from cc_firewall.audit import log_decision
+from cc_firewall.audit import O_NOFOLLOW, audit_path, log_decision
 from cc_firewall.engine import evaluate
 from cc_firewall.models import HookInput, Policy
 from cc_firewall.policy import PolicyError, default_policy_path, load_policy
@@ -20,6 +20,8 @@ from cc_firewall.policy import PolicyError, default_policy_path, load_policy
 DEFAULT_DEADLINE = 5.0
 # The watchdog that kills the process if the deadline path itself can't run, see run_hook.
 HARD_STOP_GRACE = 1.0
+# The watchdog writes its thread dump here, in the audit directory, not to stderr.
+WATCHDOG_LOG = "watchdog.log"
 
 
 def parse_hook_input(raw: str) -> HookInput:
@@ -56,11 +58,28 @@ def format_output(decision: str, reason: str) -> str:
 
 
 class _Progress:
-    """What the worker has learned so far, for the record written if the deadline expires."""
+    """What the worker has learned so far, for the record written if the deadline expires.
+
+    The worker and the deadline path both may log; :meth:`claim` lets only the first one do it,
+    so a worker that finishes just as the deadline expires can't add a second record.
+    """
 
     def __init__(self) -> None:
         self.hook: HookInput | None = None
         self.policy = "invalid"
+        self._lock = threading.Lock()
+        self._claimed = False
+
+    def claim(self) -> bool:
+        """Return True to the first caller only; that caller decides and logs."""
+        with self._lock:
+            first, self._claimed = not self._claimed, True
+            return first
+
+    def log(self, hook: HookInput | None, decision: str, rules: tuple[str, ...] = ()) -> None:
+        """Log the worker's decision unless the deadline path has claimed the outcome."""
+        if self.claim():
+            log_decision(hook, decision, rules, self.policy)
 
 
 def deadline_seconds() -> float:
@@ -77,7 +96,7 @@ def deadline_seconds() -> float:
 
 
 def _fail_closed(progress: _Progress, reason: str) -> str:
-    log_decision(progress.hook, "deny", (), progress.policy)
+    progress.log(progress.hook, "deny")
     return format_output("deny", f"cc-firewall: {reason}")
 
 
@@ -107,12 +126,12 @@ def _decide(stdin: IO[bytes], policy_path: Path | None, progress: _Progress) -> 
         )
     if verdict.decision == "allow":
         if policy.log_allowed:
-            log_decision(hook, "allow", (), progress.policy)
+            progress.log(hook, "allow")
         return None
     if policy.mode == "audit":
-        log_decision(hook, f"would-{verdict.decision}", verdict.rules, progress.policy)
+        progress.log(hook, f"would-{verdict.decision}", verdict.rules)
         return None
-    log_decision(hook, verdict.decision, verdict.rules, progress.policy)
+    progress.log(hook, verdict.decision, verdict.rules)
     return format_output(verdict.decision, verdict.reason)
 
 
@@ -125,6 +144,17 @@ def _expire(progress: _Progress) -> NoReturn:
     os._exit(0)
 
 
+def _open_watchdog_log() -> int | None:
+    """Open the watchdog dump file in the audit directory; None if that fails."""
+    try:
+        directory = audit_path().parent
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | O_NOFOLLOW
+        return os.open(directory / WATCHDOG_LOG, flags, 0o600)
+    except (OSError, RuntimeError):  # RuntimeError: Path.home() found no home directory
+        return None
+
+
 def run_hook(stdin: IO[bytes], policy_path: Path | None = None) -> str | None:
     """Read one hook payload from ``stdin`` and return the stdout text, or None for no decision.
 
@@ -135,7 +165,9 @@ def run_hook(stdin: IO[bytes], policy_path: Path | None = None) -> str | None:
     the tool when a hook times out. A stall that releases the GIL (a blocked read) ends in a
     deny printed by :func:`_expire`. A regex that backtracks holds the GIL, so neither ``join``
     nor ``_expire`` can run; the ``faulthandler`` watchdog runs in a C thread and exits with
-    status 1 instead, which the installed ``|| exit 2`` turns into a block.
+    status 1 instead, which the installed ``|| exit 2`` turns into a block. No Python code runs
+    on that path, so it writes no audit record and nothing to stderr; its thread dump goes to
+    ``watchdog.log`` in the audit directory, or to stderr if that file can't be opened.
     """
     deadline = deadline_seconds()
     progress = _Progress()
@@ -143,14 +175,19 @@ def run_hook(stdin: IO[bytes], policy_path: Path | None = None) -> str | None:
     worker = threading.Thread(
         target=lambda: result.append(_decide(stdin, policy_path, progress)), daemon=True
     )
-    faulthandler.dump_traceback_later(deadline + HARD_STOP_GRACE, exit=True)
+    dump_fd = _open_watchdog_log()
+    dump_file = sys.stderr if dump_fd is None else dump_fd
+    faulthandler.dump_traceback_later(deadline + HARD_STOP_GRACE, exit=True, file=dump_file)
     try:
         worker.start()
         worker.join(deadline)
-        if worker.is_alive():
+        if worker.is_alive() and progress.claim():
             _expire(progress)
+        worker.join()  # the worker claimed the outcome and is finishing; the watchdog still runs
     finally:
         faulthandler.cancel_dump_traceback_later()
+        if dump_fd is not None:
+            os.close(dump_fd)
     return result[0]
 
 

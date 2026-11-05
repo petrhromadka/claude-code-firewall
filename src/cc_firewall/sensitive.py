@@ -6,15 +6,18 @@ from collections.abc import Mapping
 from typing import Any
 
 # Env var names whose values are treated as secrets. `_KEY$` and the `PAT` word catch names
-# such as OPENAI_KEY or GH_PAT without matching KEYBOARD, PATH or PATTERN.
+# such as OPENAI_KEY or GH_PAT without matching KEYBOARD, PATH or PATTERN. `PWD$` catches
+# DB_PWD; the shell's PWD and OLDPWD (the current and previous directory) are excluded.
 SENSITIVE_NAME = re.compile(
     r"""
     TOKEN | SECRET | PASSW | CREDENTIAL | AUTH | SESSION | COOKIE | WEBHOOK
     | API_?KEY | ACCESS_?KEY | PRIVATE_?KEY | _KEY$ | (?:^|_)PAT(?:_|$)
+    | PWD$ | PASS$ | _PW$
     | ^AWS_ | ^AZURE_ | ^GCP_ | ^GOOGLE_APPLICATION | DATABASE_URL | _DSN$
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+NOT_SENSITIVE_NAMES = frozenset({"PWD", "OLDPWD"})
 
 # Well-known credential formats, used only to scrub text before it is logged.
 TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -42,9 +45,14 @@ TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
 MIN_SECRET_LEN = 8
 
 
+def is_sensitive_name(name: str) -> bool:
+    """Return True if an env var with this name holds a secret."""
+    return name.upper() not in NOT_SENSITIVE_NAMES and SENSITIVE_NAME.search(name) is not None
+
+
 def secret_values(env: Mapping[str, str]) -> list[str]:
     """Return values of sensitive env vars long enough to be meaningful, longest first."""
-    values = {v for k, v in env.items() if len(v) >= MIN_SECRET_LEN and SENSITIVE_NAME.search(k)}
+    values = {v for k, v in env.items() if len(v) >= MIN_SECRET_LEN and is_sensitive_name(k)}
     return sorted(values, key=len, reverse=True)
 
 
@@ -70,7 +78,19 @@ def _redact(value: Any, secrets: list[str]) -> Any:
         redacted = _redact(text, secrets)
         return value if redacted == text else redacted
     if isinstance(value, dict):
-        return {_redact(k, secrets): _redact(v, secrets) for k, v in value.items()}
+        result: dict[str, Any] = {}
+        for k, v in value.items():
+            result[_unique_key(result, _redact(k, secrets))] = _redact(v, secrets)
+        return result
     if isinstance(value, list):
         return [_redact(item, secrets) for item in value]
     return value
+
+
+def _unique_key(taken: dict[str, Any], key: str) -> str:
+    """Return ``key``, or ``key#2``, ``key#3``... when two keys are equal after redaction."""
+    candidate, n = key, 1
+    while candidate in taken:
+        n += 1
+        candidate = f"{key}#{n}"
+    return candidate

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import shlex
@@ -9,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from cc_firewall import hook
 from cc_firewall.install import install
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
@@ -31,6 +33,7 @@ def run_cli(
         text=True,
         env=env,
         check=False,
+        timeout=20,
     )
 
 
@@ -191,8 +194,43 @@ def test_backtracking_regex_is_stopped_by_watchdog(home: Path, tmp_path: Path) -
     )
     # Exit 1 from faulthandler; the installed "|| exit 2" makes Claude Code block the call.
     assert result.returncode == 1
-    assert "Timeout" in result.stderr
     assert time.monotonic() - start < 10
+    # The thread dump goes to the audit directory, not to the user's terminal.
+    assert "Thread" not in result.stderr
+    assert "Timeout" in (home / "watchdog.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("60", 5.0), ("abc", 5.0), ("-1", 5.0), ("0", 5.0), ("0.5", 0.5)]
+)
+def test_deadline_env_can_only_shorten(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: float
+) -> None:
+    monkeypatch.setenv("CC_FIREWALL_DEADLINE", value)
+    assert hook.deadline_seconds() == expected
+
+
+def test_worker_finishing_after_deadline_logs_once(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CC_FIREWALL_HOME", str(home))
+    monkeypatch.setattr(hook, "deadline_seconds", lambda: 0.1)
+    expired: list[bool] = []
+    monkeypatch.setattr(hook, "_expire", lambda _: expired.append(True))
+    logged: list[str] = []
+
+    def slow_log(_hook: object, decision: str, *_args: object, **_kwargs: object) -> None:
+        time.sleep(0.5)  # the worker has decided but is still logging when the deadline hits
+        logged.append(decision)
+
+    monkeypatch.setattr(hook, "log_decision", slow_log)
+    rule = {"id": "r", "tools": ["Bash"], "field": "command", "regex": "x", "decision": "ask"}
+    policy = write_policy(tmp_path, rules=[{**rule, "reason": "why"}])
+    stdin = io.BytesIO(payload("Bash", {"command": "x"}).encode())
+    output = hook.run_hook(stdin, policy)
+    assert output is not None
+    assert json.loads(output)["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert (logged, expired) == (["ask"], [])
 
 
 def test_installed_command_ignores_modules_planted_in_cwd(home: Path, tmp_path: Path) -> None:
@@ -246,6 +284,20 @@ def test_log_command_filters_by_decision(home: Path) -> None:
     result = run_cli(home, "log", "--decision", "ask")
     lines = result.stdout.splitlines()
     assert [json.loads(line)["decision"] for line in lines] == ["ask"]
+
+
+def test_log_and_stats_survive_bad_bytes_and_narrow_code_page(home: Path) -> None:
+    home.mkdir()
+    legacy = {"ts": "2026-11-01T10:00:00Z", "tool": "Bashč", "decision": "deny", "rules": []}
+    line = json.dumps(legacy, ensure_ascii=False).encode()
+    (home / "audit.jsonl").write_bytes(b"\xff\xfe broken\n" + line + b"\n")
+    cp1252 = {"PYTHONIOENCODING": "cp1252"}  # a Windows console code page without U+010D
+    log = run_cli(home, "log", extra_env=cp1252)
+    assert log.returncode == 0, log.stderr
+    assert "Bash\\u010d" in log.stdout
+    stats = run_cli(home, "stats", extra_env=cp1252)
+    assert stats.returncode == 0, stats.stderr
+    assert "Bash\\u010d  1" in stats.stdout
 
 
 def test_check_and_validate(home: Path) -> None:
