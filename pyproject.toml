@@ -1,7 +1,7 @@
 [project]
 name = "claude-code-firewall"
 version = "0.1.0"
-description = "PreToolUse firewall hook for Claude Code: blocks secret reads, credential exfiltration over the network and pushes to foreign git remotes, with a JSONL audit log."
+description = "Declarative policy firewall for Claude Code tool calls: deny or ask per rule, with a redacted JSONL audit log."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Petr Hromádka", email = "109349500+petrhromadka@users.noreply.github.com" }]
@@ -56,6 +56,7 @@ ban-relative-imports = "all"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["src"]
 
 [dependency-groups]
 dev = [
