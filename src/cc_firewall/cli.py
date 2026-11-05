@@ -1,9 +1,10 @@
-"""Command line interface: hook, check, validate, install, uninstall, doctor and log."""
+"""Command line interface: hook, check, validate, test, install, uninstall, doctor, log, stats."""
 
 import argparse
 import json
 import sys
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 
 from cc_firewall.audit import read_records
@@ -11,7 +12,14 @@ from cc_firewall.doctor import doctor
 from cc_firewall.engine import evaluate
 from cc_firewall.hook import main as hook_main
 from cc_firewall.install import SHELLS, SelfTestError, default_settings_path, install, uninstall
-from cc_firewall.policy import PolicyError, default_policy_path, load_policy
+from cc_firewall.policy import (
+    PolicyError,
+    default_policy_path,
+    load_policy,
+    slow_regex_warnings,
+)
+from cc_firewall.policytest import run_tests
+from cc_firewall.stats import collect, format_stats, has_rule
 
 
 def _cmd_hook(args: argparse.Namespace) -> int:
@@ -30,7 +38,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     except ValueError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 2
-    verdict = evaluate(policy, args.tool, tool_input)
+    verdict = evaluate(policy, args.tool, tool_input, cwd=args.cwd)
     sys.stdout.write(f"decision: {verdict.decision}\nmode: {policy.mode}\n")
     if verdict.rules:
         sys.stdout.write(f"rules: {', '.join(verdict.rules)}\nreason: {verdict.reason}\n")
@@ -43,8 +51,24 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     except PolicyError as exc:
         sys.stderr.write("\n".join(f"error: {e}" for e in exc.errors) + "\n")
         return 1
+    for warning in slow_regex_warnings(policy):
+        sys.stderr.write(f"warning: {warning}\n")
     sys.stdout.write(f"ok: {len(policy.rules)} rules, mode {policy.mode}\n")
     return 0
+
+
+def _cmd_test(args: argparse.Namespace) -> int:
+    try:
+        policy = load_policy(args.policy, required=True)
+    except PolicyError as exc:
+        sys.stderr.write("\n".join(f"error: {e}" for e in exc.errors) + "\n")
+        return 2
+    results = run_tests(policy)
+    for result in results:
+        sys.stdout.write(result.describe() + "\n")
+    failed = sum(not r.passed for r in results)
+    sys.stdout.write(f"{len(results) - failed} passed, {failed} failed\n")
+    return 1 if failed else 0
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
@@ -81,8 +105,16 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_log(args: argparse.Namespace) -> int:
-    for line in read_records(args.tail, args.decision):
+    lines = read_records(sys.maxsize, args.decision)
+    if args.rule is not None:
+        lines = [line for line in lines if has_rule(line, args.rule)]
+    for line in lines[-args.tail :] if args.tail > 0 else []:
         sys.stdout.write(line + "\n")
+    return 0
+
+
+def _cmd_stats(args: argparse.Namespace) -> int:
+    sys.stdout.write(format_stats(collect(args.since)) + "\n")
     return 0
 
 
@@ -102,12 +134,17 @@ def _build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check", help="dry-run a tool call against the policy")
     check.add_argument("--tool", required=True)
     check.add_argument("--input", required=True, help="tool_input as a JSON object")
+    check.add_argument("--cwd", help="working directory, for rules with cwd_glob")
     check.add_argument("--policy", type=Path)
     check.set_defaults(func=_cmd_check)
 
     validate = sub.add_parser("validate", help="validate the policy file")
     validate.add_argument("--policy", type=Path)
     validate.set_defaults(func=_cmd_validate)
+
+    test = sub.add_parser("test", help="run the test cases in the policy's 'tests' list")
+    test.add_argument("--policy", type=Path)
+    test.set_defaults(func=_cmd_test)
 
     inst = sub.add_parser("install", help="add the hook to Claude Code settings")
     inst.add_argument("--settings", type=Path, default=default_settings_path())
@@ -148,7 +185,17 @@ def _build_parser() -> argparse.ArgumentParser:
     log = sub.add_parser("log", help="print audit records")
     log.add_argument("--tail", type=int, default=20)
     log.add_argument("--decision", choices=("deny", "ask", "allow", "would-deny", "would-ask"))
+    log.add_argument("--rule", metavar="ID", help="only records that name this rule id")
     log.set_defaults(func=_cmd_log)
+
+    stats = sub.add_parser("stats", help="count audit records per decision, rule and tool")
+    stats.add_argument(
+        "--since",
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="only records from this UTC day on",
+    )
+    stats.set_defaults(func=_cmd_stats)
     return parser
 
 

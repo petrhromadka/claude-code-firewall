@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/petrhromadka/claude-code-firewall/main/schema/policy.schema.json",
   "mode": "enforce",
   "log_allowed": true,
   "rules": [
@@ -60,6 +61,58 @@
       "regex": "\\brm\\b(?=[^;&|\\n]*\\s-[a-zA-Z]*[rR])(?=[^;&|\\n]*\\s-[a-zA-Z]*f)",
       "decision": "ask",
       "reason": "Confirm recursive forced delete."
+    }
+  ],
+  "tests": [
+    {
+      "tool": "Read",
+      "input": {"file_path": "/home/me/app/.env"},
+      "expect": "deny"
+    },
+    {
+      "tool": "Edit",
+      "input": {"file_path": "C:\\Users\\me\\app\\.env.local"},
+      "expect": "deny"
+    },
+    {
+      "tool": "Read",
+      "input": {"file_path": "/home/me/app/.env.example"},
+      "expect": "allow"
+    },
+    {
+      "tool": "Grep",
+      "input": {"pattern": "API_KEY", "path": "/home/me/app/.env"},
+      "expect": "deny"
+    },
+    {
+      "tool": "Grep",
+      "input": {"pattern": "TODO", "path": "src"},
+      "expect": "allow"
+    },
+    {
+      "tool": "Bash",
+      "input": {"command": "cat .env"},
+      "expect": "ask"
+    },
+    {
+      "tool": "Bash",
+      "input": {"command": "cp .env.example config.ini"},
+      "expect": "allow"
+    },
+    {
+      "tool": "Bash",
+      "input": {"command": "cd app && git push origin feature"},
+      "expect": "ask"
+    },
+    {
+      "tool": "Bash",
+      "input": {"command": "rm -r -f build"},
+      "expect": "ask"
+    },
+    {
+      "tool": "Bash",
+      "input": {"command": "rm -r build && git status"},
+      "expect": "allow"
     }
   ]
 }

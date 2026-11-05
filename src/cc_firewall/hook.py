@@ -100,7 +100,7 @@ def _decide(stdin: IO[bytes], policy_path: Path | None, progress: _Progress) -> 
         hook = progress.hook = parse_hook_input(stdin.read().decode("utf-8"))
         if policy is None:
             return _fail_closed(progress, problem)
-        verdict = evaluate(policy, hook.tool, hook.tool_input)
+        verdict = evaluate(policy, hook.tool, hook.tool_input, cwd=hook.cwd or None)
     except Exception as exc:  # fail closed on anything unexpected
         return _fail_closed(
             progress, f"internal error, denying tool call: {type(exc).__name__}: {exc}"
