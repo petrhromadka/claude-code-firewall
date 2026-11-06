@@ -31,7 +31,7 @@ Issues = "https://github.com/petrhromadka/claude-code-firewall/issues"
 cc-firewall = "cc_firewall.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.12.23,<0.13.0"]
+requires = ["uv_build>=0.12.23,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
